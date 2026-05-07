@@ -1,0 +1,18 @@
+[project]
+name = "campus-navi-ai-part"
+version = "0.1.0"
+description = "FastAPI service for official notice analysis."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
