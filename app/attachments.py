@@ -365,7 +365,8 @@ def _read_extracted_markdown(
 def safe_filename_from_url(url: str, *, default: str = "attachment") -> str:
     raw_name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
     name = raw_name or default
-    name = re.sub(r"[^\w.-]+", "_", name).strip("._")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    name = re.sub(r"_+(\.[A-Za-z0-9]+)$", r"\1", name)
     return name or default
 
 

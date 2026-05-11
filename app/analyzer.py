@@ -110,7 +110,7 @@ class OpenAINoticeAnalyzer:
         if parsed is None:
             raise AnalyzerExecutionError("AI response did not include parsed output")
 
-        return OfficialProcessResponse.model_validate(parsed)
+        return _normalize_response(OfficialProcessResponse.model_validate(parsed))
 
     async def _build_input(self, request: OfficialProcessRequest) -> list[dict[str, Any]]:
         attachment_urls = request.attachment_urls[: self.config.max_attachments]
@@ -190,6 +190,24 @@ def _format_notice_text(
             )
 
     return "\n".join(lines)
+
+
+def _normalize_response(response: OfficialProcessResponse) -> OfficialProcessResponse:
+    if response.is_applicable:
+        return response
+
+    return response.model_copy(
+        update={
+            "start_date": None,
+            "start_time": None,
+            "end_date": None,
+            "end_time": None,
+            "required_documents": None,
+            "apply_method_type": None,
+            "apply_method_detail": None,
+            "eligibility": None,
+        }
+    )
 
 
 def _filename_from_url(url: str) -> str:

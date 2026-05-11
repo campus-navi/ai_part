@@ -4,6 +4,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 ApplyMethodType = Literal["EMAIL", "OFFLINE", "PORTAL", "LINK", "OTHER"]
+TagCode = Literal[
+    "COURSE",
+    "ACADEMIC",
+    "ACTIVITY",
+    "SCHOLARSHIP",
+    "FACILITY",
+    "STUDENT_SUPPORT",
+]
 
 
 class OfficialProcessRequest(BaseModel):
@@ -21,7 +29,7 @@ class OfficialProcessResponse(BaseModel):
     summary: str
     target_grade_min: int | None
     target_grade_max: int | None
-    tag_code: str
+    tag_code: TagCode
     keywords: list[str] | None
     contact_phone: str | None
     contact_email: str | None

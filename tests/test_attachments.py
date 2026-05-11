@@ -98,6 +98,14 @@ class SlowConverter:
         time.sleep(0.05)
 
 
+def test_safe_filename_from_url_uses_ascii_only_for_java_compatibility():
+    filename = safe_filename_from_url(
+        "https://cdn.example.com/files/2026%ED%95%99%EB%85%84%EB%8F%84%20%ED%9B%84%EA%B8%B0%20%EC%9E%85%EC%8B%9C%20%EC%95%88%EB%82%B4%EB%AC%B8.pdf"
+    )
+
+    assert filename == "2026.pdf"
+
+
 @pytest.mark.anyio
 async def test_preprocess_extracts_pdf_markdown_and_omits_fallback_url():
     preprocessor = PdfAttachmentPreprocessor(

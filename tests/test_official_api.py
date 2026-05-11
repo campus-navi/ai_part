@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.attachments import ExtractedPdfAttachment, PdfPreprocessResult
-from app.analyzer import OpenAIAnalyzerConfig, OpenAINoticeAnalyzer
+from app.analyzer import OpenAIAnalyzerConfig, OpenAINoticeAnalyzer, _normalize_response
 from app.main import app, get_notice_analyzer
 from app.models import OfficialProcessRequest, OfficialProcessResponse
 
@@ -120,6 +120,38 @@ def test_batch_process_keeps_successes_when_one_item_fails(fake_analyzer: FakeAn
     assert "structured_text" in results[126]["reason"]
     assert "AI 분석 오류" in results[126]["reason"]
     assert results[126]["result"] is None
+
+
+def test_normalize_response_clears_application_fields_when_not_applicable():
+    response = OfficialProcessResponse(
+        summary="구술면접 시험 안내입니다.",
+        target_grade_min=None,
+        target_grade_max=None,
+        tag_code="ACADEMIC",
+        keywords=["구술면접"],
+        contact_phone="02-3290-5973",
+        contact_email=None,
+        start_date="2026-05-16",
+        start_time="10:00:00",
+        end_date="2026-05-16",
+        end_time=None,
+        required_documents="수험표, 신분증",
+        apply_method_type="OTHER",
+        apply_method_detail="입실 후 면접",
+        eligibility="수험생",
+        is_applicable=False,
+    )
+
+    normalized = _normalize_response(response)
+
+    assert normalized.start_date is None
+    assert normalized.start_time is None
+    assert normalized.end_date is None
+    assert normalized.end_time is None
+    assert normalized.required_documents is None
+    assert normalized.apply_method_type is None
+    assert normalized.apply_method_detail is None
+    assert normalized.eligibility is None
 
 
 class FakeAttachmentPreprocessor:
