@@ -1,4 +1,9 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+
+ApplyMethodType = Literal["EMAIL", "OFFLINE", "PORTAL", "LINK", "OTHER"]
 
 
 class OfficialProcessRequest(BaseModel):
@@ -25,9 +30,10 @@ class OfficialProcessResponse(BaseModel):
     end_date: str | None
     end_time: str | None
     required_documents: str | None
-    apply_method: str | None
+    apply_method_type: ApplyMethodType | None
+    apply_method_detail: str | None
     eligibility: str | None
-    recruitment_count: str | None
+    is_applicable: bool
 
 
 class BatchProcessRequest(BaseModel):

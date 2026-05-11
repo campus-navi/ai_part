@@ -1,197 +1,172 @@
 from __future__ import annotations
 
-import re
+import os
 from dataclasses import dataclass
+from typing import Any, Protocol
+from urllib.parse import unquote, urlparse
 
 from app.models import OfficialProcessRequest, OfficialProcessResponse
 
 
+TAG_CODES = (
+    "COURSE",
+    "ACADEMIC",
+    "ACTIVITY",
+    "SCHOLARSHIP",
+    "FACILITY",
+    "STUDENT_SUPPORT",
+)
+
+ANALYSIS_INSTRUCTIONS = f"""
+You are the Campus Navi official-notice analysis engine.
+Analyze Korean university notices using every provided source:
+structured text, images, and attached files.
+
+Return only data that is grounded in the notice. Do not guess missing details.
+Follow these rules:
+- `summary`: one concise Korean sentence.
+- `tag_code`: choose exactly one of {", ".join(TAG_CODES)}.
+- `keywords`: key Korean phrases from the notice, or null if none are useful.
+- `target_grade_min` and `target_grade_max`: undergraduate grade range only. Use null if not specified.
+- `is_applicable`: true only when the notice has a user action such as application, registration, submission, recruitment, or participation signup.
+- If `is_applicable` is false, all application fields must be null:
+  `start_date`, `start_time`, `end_date`, `end_time`, `required_documents`,
+  `apply_method_type`, `apply_method_detail`, and `eligibility`.
+- Application dates are application/submission period dates, not event dates. Use YYYY-MM-DD and HH:mm:ss.
+- `apply_method_type`: EMAIL, OFFLINE, PORTAL, LINK, OTHER, or null.
+- `apply_method_detail`: preserve concise actionable details such as portal name, URL, email address, office, or special instructions.
+- `required_documents` and `eligibility`: preserve concise Korean text from the notice. Use newlines when multiple conditions are listed.
+""".strip()
+
+
+class NoticeAnalyzer(Protocol):
+    async def analyze(self, request: OfficialProcessRequest) -> OfficialProcessResponse:
+        ...
+
+
+class AnalyzerConfigurationError(RuntimeError):
+    pass
+
+
+class AnalyzerExecutionError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
-class TagRule:
-    code: str
-    keywords: tuple[str, ...]
+class OpenAIAnalyzerConfig:
+    model: str = "gpt-4.1-mini"
+    max_images: int = 8
+    max_attachments: int = 8
+    image_detail: str = "auto"
+
+    @classmethod
+    def from_env(cls) -> OpenAIAnalyzerConfig:
+        return cls(
+            model=os.getenv("OPENAI_MODEL", cls.model),
+            max_images=_env_int("AI_MAX_IMAGES", cls.max_images),
+            max_attachments=_env_int("AI_MAX_ATTACHMENTS", cls.max_attachments),
+            image_detail=os.getenv("AI_IMAGE_DETAIL", cls.image_detail),
+        )
 
 
-TAG_RULES: tuple[TagRule, ...] = (
-    TagRule(
-        "SCHOLARSHIP",
-        ("교내장학금", "교외장학금", "성적우수장학금", "장학금", "지원금", "수혜", "scholarship"),
-    ),
-    TagRule("EMPLOYMENT", ("취업", "인턴", "채용공고", "채용", "employment")),
-    TagRule("ACADEMIC", ("학사", "수강", "졸업", "등록", "휴학", "복학")),
-    TagRule("EVENT", ("행사", "특강", "세미나", "설명회")),
-)
+class OpenAINoticeAnalyzer:
+    def __init__(self, config: OpenAIAnalyzerConfig | None = None) -> None:
+        self.config = config or OpenAIAnalyzerConfig.from_env()
+        self._client: Any | None = None
 
-KEYWORD_CANDIDATES: tuple[str, ...] = (
-    "교내장학금",
-    "교외장학금",
-    "성적우수장학금",
-    "성적증명서",
-    "재학증명서",
-    "장학금",
-    "지원금",
-    "채용공고",
-    "인턴",
-    "채용",
-    "취업",
-    "수강",
-    "졸업",
-    "등록",
-    "휴학",
-    "복학",
-    "휴관",
-)
+    async def analyze(self, request: OfficialProcessRequest) -> OfficialProcessResponse:
+        if not request.structured_text.strip():
+            raise ValueError("structured_text must not be blank")
 
-APPLICATION_MARKERS: tuple[str, ...] = (
-    "신청",
-    "접수",
-    "지원방법",
-    "신청방법",
-    "모집",
-    "지원자격",
-    "신청자격",
-    "필요서류",
-    "제출서류",
-)
+        try:
+            response = await self._get_client().responses.parse(
+                model=self.config.model,
+                instructions=ANALYSIS_INSTRUCTIONS,
+                input=self._build_input(request),
+                text_format=OfficialProcessResponse,
+            )
+        except AnalyzerConfigurationError:
+            raise
+        except Exception as exc:
+            raise AnalyzerExecutionError(f"AI analysis failed: {exc}") from exc
 
-PHONE_PATTERN = re.compile(
-    r"\b(?:\d{2,3}-\d{3,4}-\d{4}|\d{2,3}\)\s?\d{3,4}-\d{4})\b"
-)
-EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-DATE_PATTERN = re.compile(
-    r"(?P<date>\d{4}[./-]\d{1,2}[./-]\d{1,2})(?:\s*(?P<time>\d{1,2}:\d{2}(?::\d{2})?))?"
-)
-GRADE_PATTERN = re.compile(r"(?<!\d)([1-6])\s*학년")
+        parsed = getattr(response, "output_parsed", None)
+        if parsed is None:
+            raise AnalyzerExecutionError("AI response did not include parsed output")
+
+        return OfficialProcessResponse.model_validate(parsed)
+
+    def _build_input(self, request: OfficialProcessRequest) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": _format_notice_text(request),
+            }
+        ]
+
+        for image_url in request.image_urls[: self.config.max_images]:
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": image_url,
+                    "detail": self.config.image_detail,
+                }
+            )
+
+        for attachment_url in request.attachment_urls[: self.config.max_attachments]:
+            content.append(
+                {
+                    "type": "input_file",
+                    "file_url": attachment_url,
+                    "filename": _filename_from_url(attachment_url),
+                }
+            )
+
+        return [{"role": "user", "content": content}]
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+
+        if not os.getenv("OPENAI_API_KEY"):
+            raise AnalyzerConfigurationError("OPENAI_API_KEY is required")
+
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise AnalyzerConfigurationError("openai package is not installed") from exc
+
+        self._client = AsyncOpenAI()
+        return self._client
 
 
-def analyze_notice(request: OfficialProcessRequest) -> OfficialProcessResponse:
-    text = request.structured_text.strip()
-    if not text:
-        raise ValueError("structured_text must not be blank")
-
-    is_application = _is_application_notice(text)
-    application_fields = _extract_application_fields(text) if is_application else {}
-    target_grade_min, target_grade_max = _extract_grade_range(text)
-
-    return OfficialProcessResponse(
-        summary=_summarize(text),
-        target_grade_min=target_grade_min,
-        target_grade_max=target_grade_max,
-        tag_code=_classify_tag(text),
-        keywords=_extract_keywords(text),
-        contact_phone=_first_match(PHONE_PATTERN, text),
-        contact_email=_first_match(EMAIL_PATTERN, text),
-        start_date=application_fields.get("start_date"),
-        start_time=application_fields.get("start_time"),
-        end_date=application_fields.get("end_date"),
-        end_time=application_fields.get("end_time"),
-        required_documents=application_fields.get("required_documents"),
-        apply_method=application_fields.get("apply_method"),
-        eligibility=application_fields.get("eligibility"),
-        recruitment_count=application_fields.get("recruitment_count"),
+def _format_notice_text(request: OfficialProcessRequest) -> str:
+    return "\n".join(
+        (
+            f"post_id: {request.post_id}",
+            "structured_text:",
+            request.structured_text.strip(),
+        )
     )
 
 
-def _summarize(text: str) -> str:
-    compact = " ".join(line.strip() for line in text.splitlines() if line.strip())
-    first_sentence = re.match(r"(.+?(?:[.!?。]|입니다\.?))(?:\s|$)", compact)
-    if first_sentence:
-        return first_sentence.group(1).strip()
-    return compact[:80]
+def _filename_from_url(url: str) -> str:
+    path = urlparse(url).path
+    filename = unquote(path.rsplit("/", 1)[-1])
+    return filename or "attachment"
 
 
-def _extract_grade_range(text: str) -> tuple[int | None, int | None]:
-    if "전학년" in text or "전체 학년" in text:
-        return 1, 4
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
 
-    grades = [int(match) for match in GRADE_PATTERN.findall(text)]
-    if not grades:
-        return None, None
-    return min(grades), max(grades)
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise AnalyzerConfigurationError(f"{name} must be an integer") from exc
 
+    if value < 0:
+        raise AnalyzerConfigurationError(f"{name} must be greater than or equal to 0")
 
-def _classify_tag(text: str) -> str:
-    lower_text = text.lower()
-    best_code = "GENERAL"
-    best_score = 0
-
-    for rule in TAG_RULES:
-        score = sum(1 for keyword in rule.keywords if keyword.lower() in lower_text)
-        if score > best_score:
-            best_code = rule.code
-            best_score = score
-
-    return best_code
-
-
-def _extract_keywords(text: str) -> list[str] | None:
-    keywords: list[str] = []
-    for candidate in KEYWORD_CANDIDATES:
-        if candidate not in text:
-            continue
-        if any(candidate in existing and candidate != existing for existing in keywords):
-            continue
-        keywords.append(candidate)
-
-    return keywords or None
-
-
-def _is_application_notice(text: str) -> bool:
-    return any(marker in text for marker in APPLICATION_MARKERS)
-
-
-def _extract_application_fields(text: str) -> dict[str, str | None]:
-    first_date, second_date = _extract_dates(text)
-    return {
-        "start_date": first_date[0] if first_date else None,
-        "start_time": first_date[1] if first_date else None,
-        "end_date": second_date[0] if second_date else None,
-        "end_time": second_date[1] if second_date else None,
-        "required_documents": _extract_labeled_value(text, ("필요서류", "제출서류", "구비서류")),
-        "apply_method": _extract_labeled_value(text, ("지원방법", "신청방법", "접수방법")),
-        "eligibility": _extract_labeled_value(text, ("지원자격", "신청자격")),
-        "recruitment_count": _extract_labeled_value(
-            text,
-            ("모집인원", "선발인원", "모집 인원", "선발 인원"),
-        ),
-    }
-
-
-def _extract_dates(
-    text: str,
-) -> tuple[tuple[str, str | None] | None, tuple[str, str | None] | None]:
-    dates = [
-        (_normalize_date(match.group("date")), _normalize_time(match.group("time")))
-        for match in DATE_PATTERN.finditer(text)
-    ]
-    first = dates[0] if dates else None
-    second = dates[1] if len(dates) > 1 else None
-    return first, second
-
-
-def _normalize_date(value: str) -> str:
-    year, month, day = re.split(r"[./-]", value)
-    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
-
-
-def _normalize_time(value: str | None) -> str | None:
-    if value is None:
-        return None
-    hour, minute, *second = value.split(":")
-    return f"{int(hour):02d}:{int(minute):02d}:{int(second[0]) if second else 0:02d}"
-
-
-def _extract_labeled_value(text: str, labels: tuple[str, ...]) -> str | None:
-    for line in text.splitlines():
-        stripped = line.strip()
-        for label in labels:
-            pattern = rf"^{re.escape(label)}\s*[:：]\s*(?P<value>.+)$"
-            match = re.match(pattern, stripped)
-            if match:
-                return match.group("value").strip()
-    return None
-
-
-def _first_match(pattern: re.Pattern[str], text: str) -> str | None:
-    match = pattern.search(text)
-    return match.group(0).strip() if match else None
+    return value

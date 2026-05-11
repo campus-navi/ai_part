@@ -5,6 +5,7 @@ description = "FastAPI service for official notice analysis."
 requires-python = ">=3.12"
 dependencies = [
     "fastapi",
+    "openai",
     "uvicorn[standard]",
 ]
 

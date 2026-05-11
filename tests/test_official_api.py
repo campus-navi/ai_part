@@ -1,27 +1,59 @@
+import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.analyzer import OpenAIAnalyzerConfig, OpenAINoticeAnalyzer
+from app.main import app, get_notice_analyzer
+from app.models import OfficialProcessRequest, OfficialProcessResponse
 
 
-client = TestClient(app)
+class FakeAnalyzer:
+    def __init__(self) -> None:
+        self.requests: list[OfficialProcessRequest] = []
+
+    async def analyze(self, request: OfficialProcessRequest) -> OfficialProcessResponse:
+        self.requests.append(request)
+        if not request.structured_text.strip():
+            raise ValueError("structured_text must not be blank")
+
+        return OfficialProcessResponse(
+            summary="2026학년도 2학기 교내장학금 신청 안내입니다.",
+            target_grade_min=2,
+            target_grade_max=4,
+            tag_code="SCHOLARSHIP",
+            keywords=["교내장학금", "성적우수장학금"],
+            contact_phone="02-3290-1234",
+            contact_email=None,
+            start_date="2026-04-01",
+            start_time="09:00:00",
+            end_date="2026-05-31",
+            end_time=None,
+            required_documents="성적증명서, 재학증명서",
+            apply_method_type="OTHER",
+            apply_method_detail="장학 담당 부서 안내에 따라 제출",
+            eligibility="현재 3학기 이상 이수 중인 재학생\n편입생은 한 학기 이상 이수 후 신청 가능",
+            is_applicable=True,
+        )
 
 
-def test_process_official_notice_extracts_document_contract_fields():
+@pytest.fixture
+def fake_analyzer() -> FakeAnalyzer:
+    analyzer = FakeAnalyzer()
+    app.dependency_overrides[get_notice_analyzer] = lambda: analyzer
+    try:
+        yield analyzer
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_process_official_notice_returns_ai_response(fake_analyzer: FakeAnalyzer):
+    client = TestClient(app)
+
     response = client.post(
         "/ai/official/process",
         json={
             "post_id": 123,
-            "structured_text": (
-                "2026학년도 2학기 교내장학금 신청 안내입니다.\n"
-                "대상: 2학년부터 4학년까지 재학생\n"
-                "신청기간: 2026.04.01 09:00부터 2026-05-31까지\n"
-                "필요서류: 성적증명서, 재학증명서\n"
-                "지원방법: 포털 온라인 신청\n"
-                "지원자격: 현재 3학기 이상 이수 중인 재학생\n"
-                "모집인원: 100명\n"
-                "문의: 02-3290-1234 scholarship@example.ac.kr"
-            ),
-            "image_urls": [],
+            "structured_text": "2026학년도 2학기 교내장학금 신청 안내...",
+            "image_urls": ["https://cdn.example.com/notice.png"],
             "attachment_urls": ["https://s3.amazonaws.com/example/notice.pdf"],
         },
     )
@@ -32,51 +64,33 @@ def test_process_official_notice_extracts_document_contract_fields():
         "target_grade_min": 2,
         "target_grade_max": 4,
         "tag_code": "SCHOLARSHIP",
-        "keywords": ["교내장학금", "성적증명서", "재학증명서"],
+        "keywords": ["교내장학금", "성적우수장학금"],
         "contact_phone": "02-3290-1234",
-        "contact_email": "scholarship@example.ac.kr",
+        "contact_email": None,
         "start_date": "2026-04-01",
         "start_time": "09:00:00",
         "end_date": "2026-05-31",
         "end_time": None,
         "required_documents": "성적증명서, 재학증명서",
-        "apply_method": "포털 온라인 신청",
-        "eligibility": "현재 3학기 이상 이수 중인 재학생",
-        "recruitment_count": "100명",
+        "apply_method_type": "OTHER",
+        "apply_method_detail": "장학 담당 부서 안내에 따라 제출",
+        "eligibility": "현재 3학기 이상 이수 중인 재학생\n편입생은 한 학기 이상 이수 후 신청 가능",
+        "is_applicable": True,
     }
+    assert fake_analyzer.requests[0].image_urls == ["https://cdn.example.com/notice.png"]
+    assert fake_analyzer.requests[0].attachment_urls == ["https://s3.amazonaws.com/example/notice.pdf"]
 
 
-def test_process_non_application_notice_returns_application_fields_as_null():
-    response = client.post(
-        "/ai/official/process",
-        json={
-            "post_id": 124,
-            "structured_text": "도서관 임시 휴관 안내입니다. 전기 점검으로 5월 1일 휴관합니다.",
-            "image_urls": [],
-            "attachment_urls": [],
-        },
-    )
+def test_batch_process_keeps_successes_when_one_item_fails(fake_analyzer: FakeAnalyzer):
+    client = TestClient(app)
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["summary"] == "도서관 임시 휴관 안내입니다."
-    assert body["tag_code"] == "GENERAL"
-    assert body["start_date"] is None
-    assert body["end_date"] is None
-    assert body["required_documents"] is None
-    assert body["apply_method"] is None
-    assert body["eligibility"] is None
-    assert body["recruitment_count"] is None
-
-
-def test_batch_process_keeps_successes_when_one_item_fails():
     response = client.post(
         "/ai/official/process/batch",
         json={
             "items": [
                 {
                     "post_id": 125,
-                    "structured_text": "인턴 채용공고입니다. 신청기간: 2026-06-01부터 2026-06-10까지",
+                    "structured_text": "인턴 채용공고입니다.",
                     "image_urls": [],
                     "attachment_urls": [],
                 },
@@ -95,7 +109,45 @@ def test_batch_process_keeps_successes_when_one_item_fails():
 
     assert results[125]["success"] is True
     assert results[125]["reason"] is None
-    assert results[125]["result"]["tag_code"] == "EMPLOYMENT"
+    assert results[125]["result"]["tag_code"] == "SCHOLARSHIP"
     assert results[126]["success"] is False
     assert "structured_text" in results[126]["reason"]
+    assert "AI 분석 오류" in results[126]["reason"]
     assert results[126]["result"] is None
+
+
+def test_openai_analyzer_builds_multimodal_input():
+    analyzer = OpenAINoticeAnalyzer(
+        OpenAIAnalyzerConfig(max_images=1, max_attachments=1)
+    )
+    request = OfficialProcessRequest(
+        post_id=123,
+        structured_text="공지 본문",
+        image_urls=[
+            "https://cdn.example.com/notice-1.png",
+            "https://cdn.example.com/notice-2.png",
+        ],
+        attachment_urls=[
+            "https://cdn.example.com/files/notice%20guide.pdf",
+            "https://cdn.example.com/files/extra.pdf",
+        ],
+    )
+
+    payload = analyzer._build_input(request)
+
+    content = payload[0]["content"]
+    assert content[0] == {
+        "type": "input_text",
+        "text": "post_id: 123\nstructured_text:\n공지 본문",
+    }
+    assert content[1] == {
+        "type": "input_image",
+        "image_url": "https://cdn.example.com/notice-1.png",
+        "detail": "auto",
+    }
+    assert content[2] == {
+        "type": "input_file",
+        "file_url": "https://cdn.example.com/files/notice%20guide.pdf",
+        "filename": "notice guide.pdf",
+    }
+    assert len(content) == 3
