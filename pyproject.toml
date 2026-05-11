@@ -5,13 +5,15 @@ description = "FastAPI service for official notice analysis."
 requires-python = ">=3.12"
 dependencies = [
     "fastapi",
+    "httpx",
     "openai",
+    "opendataloader-pdf[hybrid]",
+    "python-dotenv",
     "uvicorn[standard]",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "httpx",
     "pytest",
 ]
 

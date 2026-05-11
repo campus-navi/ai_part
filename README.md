@@ -15,11 +15,14 @@ python3.12 -m venv .venv
 
 ## 실행
 
-OpenAI API 키를 환경변수로 설정한 뒤 실행합니다.
+OpenAI API 키는 `.env`로 관리합니다. `.env.example`을 복사해 값을 채우고,
+PDF 첨부 전처리를 위해 Java 11+와 OpenDataLoader hybrid backend를 준비한 뒤
+실행합니다.
 
 ```bash
-export OPENAI_API_KEY="..."
-export OPENAI_MODEL="gpt-4.1-mini"
+cp .env.example .env
+# .env의 OPENAI_API_KEY 값을 채웁니다.
+opendataloader-pdf-hybrid --port 5002 --force-ocr --ocr-lang "ko,en"
 ```
 
 ```bash
@@ -38,6 +41,10 @@ export OPENAI_MODEL="gpt-4.1-mini"
 신청 관련 공지는 `apply_method_type`(`EMAIL`, `OFFLINE`, `PORTAL`, `LINK`,
 `OTHER`)과 `apply_method_detail`, `is_applicable`을 함께 반환합니다.
 
+PDF 첨부는 OpenDataLoader로 Markdown/JSON 변환을 먼저 시도합니다. 성공한 PDF는
+추출 Markdown을 AI 입력 텍스트에 포함하고, 실패한 PDF와 비-PDF 첨부는 기존처럼
+OpenAI `input_file` URL로 전달합니다.
+
 환경변수:
 
 - `OPENAI_API_KEY`: 필수
@@ -45,6 +52,15 @@ export OPENAI_MODEL="gpt-4.1-mini"
 - `AI_MAX_IMAGES`: 선택, 기본값 `8`
 - `AI_MAX_ATTACHMENTS`: 선택, 기본값 `8`
 - `AI_IMAGE_DETAIL`: 선택, 기본값 `auto`
+- `PDF_PREPROCESS_ENABLED`: 선택, 기본값 `true`
+- `PDF_DOWNLOAD_TIMEOUT_SECONDS`: 선택, 기본값 `10`
+- `PDF_MAX_BYTES`: 선택, 기본값 `10485760`
+- `PDF_MAX_FILES`: 선택, 기본값 `8`
+- `PDF_EXTRACTED_TEXT_MAX_CHARS`: 선택, 기본값 `60000`
+- `PDF_CONVERT_TIMEOUT_SECONDS`: 선택, 기본값 `180`
+- `OPENDATALOADER_HYBRID`: 선택, 기본값 `docling-fast`
+- `OPENDATALOADER_HYBRID_MODE`: 선택, 기본값 `full`
+- `OPENDATALOADER_HYBRID_TIMEOUT_MS`: 선택, 기본값 `120000`
 
 ## 테스트
 

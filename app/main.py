@@ -1,6 +1,10 @@
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException
+from dotenv import load_dotenv
 
 from app.analyzer import (
     AnalyzerConfigurationError,
@@ -17,8 +21,20 @@ from app.models import (
 )
 
 
-app = FastAPI(title="Campus Navi AI API")
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
+logger = logging.getLogger(__name__)
 notice_analyzer = OpenAINoticeAnalyzer()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    for warning in notice_analyzer.check_preflight():
+        logger.warning("PDF preprocessing preflight warning: %s", warning)
+    yield
+
+
+app = FastAPI(title="Campus Navi AI API", lifespan=lifespan)
 
 
 def get_notice_analyzer() -> NoticeAnalyzer:

@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.attachments import ExtractedPdfAttachment, PdfPreprocessResult
 from app.analyzer import OpenAIAnalyzerConfig, OpenAINoticeAnalyzer
 from app.main import app, get_notice_analyzer
 from app.models import OfficialProcessRequest, OfficialProcessResponse
@@ -33,6 +34,11 @@ class FakeAnalyzer:
             eligibility="현재 3학기 이상 이수 중인 재학생\n편입생은 한 학기 이상 이수 후 신청 가능",
             is_applicable=True,
         )
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 @pytest.fixture
@@ -116,9 +122,28 @@ def test_batch_process_keeps_successes_when_one_item_fails(fake_analyzer: FakeAn
     assert results[126]["result"] is None
 
 
-def test_openai_analyzer_builds_multimodal_input():
+class FakeAttachmentPreprocessor:
+    async def preprocess(self, urls: list[str]) -> PdfPreprocessResult:
+        return PdfPreprocessResult(
+            extracted=[
+                ExtractedPdfAttachment(
+                    url=urls[0],
+                    filename="notice guide.pdf",
+                    markdown="# PDF 안내\n장학금 신청 서류 안내",
+                )
+            ],
+            fallback_urls=urls[1:],
+        )
+
+    def check_preflight(self):
+        return type("Preflight", (), {"warnings": []})()
+
+
+@pytest.mark.anyio
+async def test_openai_analyzer_builds_multimodal_input():
     analyzer = OpenAINoticeAnalyzer(
-        OpenAIAnalyzerConfig(max_images=1, max_attachments=1)
+        OpenAIAnalyzerConfig(max_images=1, max_attachments=2),
+        attachment_preprocessor=FakeAttachmentPreprocessor(),
     )
     request = OfficialProcessRequest(
         post_id=123,
@@ -133,13 +158,14 @@ def test_openai_analyzer_builds_multimodal_input():
         ],
     )
 
-    payload = analyzer._build_input(request)
+    payload = await analyzer._build_input(request)
 
     content = payload[0]["content"]
-    assert content[0] == {
-        "type": "input_text",
-        "text": "post_id: 123\nstructured_text:\n공지 본문",
-    }
+    assert content[0]["type"] == "input_text"
+    assert content[0]["text"].startswith("post_id: 123\nstructured_text:\n공지 본문")
+    assert "PDF attachments extracted by OpenDataLoader" in content[0]["text"]
+    assert "untrusted attachment content" in content[0]["text"]
+    assert "# PDF 안내\n장학금 신청 서류 안내" in content[0]["text"]
     assert content[1] == {
         "type": "input_image",
         "image_url": "https://cdn.example.com/notice-1.png",
@@ -147,7 +173,7 @@ def test_openai_analyzer_builds_multimodal_input():
     }
     assert content[2] == {
         "type": "input_file",
-        "file_url": "https://cdn.example.com/files/notice%20guide.pdf",
-        "filename": "notice guide.pdf",
+        "file_url": "https://cdn.example.com/files/extra.pdf",
+        "filename": "extra.pdf",
     }
     assert len(content) == 3
