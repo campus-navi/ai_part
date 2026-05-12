@@ -179,6 +179,32 @@ def test_normalize_response_clears_application_fields_when_not_applicable():
     assert normalized.eligibility is None
 
 
+def test_normalize_response_clears_apply_method_detail_unless_other():
+    response = OfficialProcessResponse(
+        summary="장학금 신청 안내입니다.",
+        target_grade_min=None,
+        target_grade_max=None,
+        tag_code="SCHOLARSHIP",
+        keywords=["장학금"],
+        contact_phone=None,
+        contact_email=None,
+        start_date="2026-05-06",
+        start_time="10:00:00",
+        end_date="2026-05-22",
+        end_time="17:00:00",
+        required_documents="신청서, 동의서",
+        apply_method_type="FILE",
+        apply_method_detail="화성시인재육성재단 홈페이지 내 온라인 신청",
+        eligibility="학자금 지원구간 5구간 이내 대학생",
+        is_applicable=True,
+    )
+
+    normalized = _normalize_response(response)
+
+    assert normalized.apply_method_type == "FILE"
+    assert normalized.apply_method_detail is None
+
+
 class FakeAttachmentPreprocessor:
     async def preprocess(self, urls: list[str]) -> PdfPreprocessResult:
         if not urls:
@@ -194,6 +220,14 @@ class FakeAttachmentPreprocessor:
             ],
             fallback_urls=urls[1:],
         )
+
+    def check_preflight(self):
+        return type("Preflight", (), {"warnings": []})()
+
+
+class FallbackOnlyAttachmentPreprocessor:
+    async def preprocess(self, urls: list[str]) -> PdfPreprocessResult:
+        return PdfPreprocessResult(fallback_urls=urls)
 
     def check_preflight(self):
         return type("Preflight", (), {"warnings": []})()
@@ -234,7 +268,6 @@ async def test_openai_analyzer_builds_multimodal_input():
     assert content[2] == {
         "type": "input_file",
         "file_url": "https://cdn.example.com/files/extra.pdf",
-        "filename": "extra.pdf",
     }
     assert len(content) == 3
 
@@ -262,3 +295,31 @@ async def test_openai_analyzer_builds_multimodal_input_with_null_structured_text
         "image_url": "https://cdn.example.com/image-only-notice.png",
         "detail": "auto",
     }
+
+
+@pytest.mark.anyio
+async def test_openai_analyzer_filters_fallback_attachments_for_openai_support():
+    analyzer = OpenAINoticeAnalyzer(
+        OpenAIAnalyzerConfig(max_images=2, max_attachments=4),
+        attachment_preprocessor=FallbackOnlyAttachmentPreprocessor(),
+    )
+    request = OfficialProcessRequest(
+        post_id=3,
+        structured_text="모집기간 :2026. 5. 6.(수) 10시 ~ 5. 22.(금) 17시",
+        image_urls=["https://cdn.example.com/images/notice.png?X-Amz-Signature=abc123"],
+        attachment_urls=[
+            "https://cdn.example.com/files/guide.hwp?X-Amz-Signature=def456",
+            "https://cdn.example.com/files/fallback.pdf?X-Amz-Signature=ghi789",
+            "https://cdn.example.com/files/archive.zip?X-Amz-Signature=jkl012",
+            "https://cdn.example.com/files/poster.webp?X-Amz-Signature=mno345",
+        ],
+    )
+
+    payload = await analyzer._build_input(request)
+
+    content = payload[0]["content"]
+    assert {"type": "input_file", "file_url": request.attachment_urls[1]} in content
+    assert all(item.get("filename") is None for item in content)
+    assert {"type": "input_image", "image_url": request.attachment_urls[3], "detail": "auto"} in content
+    assert not any("guide.hwp" in str(item) for item in content)
+    assert not any("archive.zip" in str(item) for item in content)

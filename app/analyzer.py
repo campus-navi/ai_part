@@ -24,6 +24,26 @@ TAG_CODES = (
     "FACILITY",
     "STUDENT_SUPPORT",
 )
+OPENAI_IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
+OPENAI_FILE_EXTENSIONS = {
+    ".csv",
+    ".docx",
+    ".htm",
+    ".html",
+    ".json",
+    ".jsonl",
+    ".md",
+    ".markdown",
+    ".pdf",
+    ".pptx",
+    ".rtf",
+    ".txt",
+    ".xls",
+    ".xlsx",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 ANALYSIS_INSTRUCTIONS = f"""
 You are the Campus Navi official-notice analysis engine.
@@ -41,8 +61,8 @@ Follow these rules:
   `start_date`, `start_time`, `end_date`, `end_time`, `required_documents`,
   `apply_method_type`, `apply_method_detail`, and `eligibility`.
 - Application dates are application/submission period dates, not event dates. Use YYYY-MM-DD and HH:mm:ss.
-- `apply_method_type`: EMAIL, OFFLINE, PORTAL, LINK, OTHER, or null.
-- `apply_method_detail`: preserve concise actionable details such as portal name, URL, email address, office, or special instructions.
+- `apply_method_type`: FILE, OFFLINE, PORTAL, LINK, OTHER, or null.
+- `apply_method_detail`: return a value only when `apply_method_type` is OTHER. Otherwise return null.
 - `required_documents` and `eligibility`: preserve concise Korean text from the notice. Use newlines when multiple conditions are listed.
 """.strip()
 
@@ -125,6 +145,7 @@ class OpenAINoticeAnalyzer:
             }
         ]
 
+        image_count = 0
         for image_url in request.image_urls[: self.config.max_images]:
             content.append(
                 {
@@ -133,15 +154,33 @@ class OpenAINoticeAnalyzer:
                     "detail": self.config.image_detail,
                 }
             )
+            image_count += 1
 
         for attachment_url in pdf_preprocess_result.fallback_urls:
-            content.append(
-                {
-                    "type": "input_file",
-                    "file_url": attachment_url,
-                    "filename": _filename_from_url(attachment_url),
-                }
-            )
+            if _is_openai_image_url(attachment_url):
+                if image_count < self.config.max_images:
+                    content.append(
+                        {
+                            "type": "input_image",
+                            "image_url": attachment_url,
+                            "detail": self.config.image_detail,
+                        }
+                    )
+                    image_count += 1
+                else:
+                    logger.warning("Attachment image skipped max_images limit: %s", attachment_url)
+                continue
+
+            if _is_openai_file_url(attachment_url):
+                content.append(
+                    {
+                        "type": "input_file",
+                        "file_url": attachment_url,
+                    }
+                )
+                continue
+
+            logger.warning("Unsupported attachment skipped from OpenAI input: %s", attachment_url)
 
         return [{"role": "user", "content": content}]
 
@@ -193,21 +232,27 @@ def _format_notice_text(
 
 
 def _normalize_response(response: OfficialProcessResponse) -> OfficialProcessResponse:
-    if response.is_applicable:
+    updates: dict[str, Any] = {}
+    if not response.is_applicable:
+        updates.update(
+            {
+                "start_date": None,
+                "start_time": None,
+                "end_date": None,
+                "end_time": None,
+                "required_documents": None,
+                "apply_method_type": None,
+                "apply_method_detail": None,
+                "eligibility": None,
+            }
+        )
+    elif response.apply_method_type != "OTHER":
+        updates["apply_method_detail"] = None
+
+    if not updates:
         return response
 
-    return response.model_copy(
-        update={
-            "start_date": None,
-            "start_time": None,
-            "end_date": None,
-            "end_time": None,
-            "required_documents": None,
-            "apply_method_type": None,
-            "apply_method_detail": None,
-            "eligibility": None,
-        }
-    )
+    return response.model_copy(update=updates)
 
 
 def _has_analysis_source(request: OfficialProcessRequest) -> bool:
@@ -218,10 +263,20 @@ def _structured_text(request: OfficialProcessRequest) -> str:
     return (request.structured_text or "").strip()
 
 
-def _filename_from_url(url: str) -> str:
-    path = urlparse(url).path
-    filename = unquote(path.rsplit("/", 1)[-1])
-    return filename or "attachment"
+def _is_openai_image_url(url: str) -> bool:
+    return _extension_from_url(url) in OPENAI_IMAGE_EXTENSIONS
+
+
+def _is_openai_file_url(url: str) -> bool:
+    return _extension_from_url(url) in OPENAI_FILE_EXTENSIONS
+
+
+def _extension_from_url(url: str) -> str:
+    path = unquote(urlparse(url).path)
+    filename = path.rsplit("/", 1)[-1]
+    if "." not in filename:
+        return ""
+    return f".{filename.rsplit('.', 1)[-1].lower()}"
 
 
 def _env_int(name: str, default: int) -> int:

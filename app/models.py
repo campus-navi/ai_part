@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-ApplyMethodType = Literal["EMAIL", "OFFLINE", "PORTAL", "LINK", "OTHER"]
+ApplyMethodType = Literal["FILE", "OFFLINE", "PORTAL", "LINK", "OTHER"]
 TagCode = Literal[
     "COURSE",
     "ACADEMIC",

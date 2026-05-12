@@ -38,12 +38,13 @@ opendataloader-pdf-hybrid --port 5002 --force-ocr --ocr-lang "ko,en"
 `attachment_urls`를 함께 전달해 멀티모달로 분석합니다. 응답은 Pydantic 스키마로
 검증하며, `tag_code`는 Spring 백엔드의 seed 태그 코드(`COURSE`, `ACADEMIC`,
 `ACTIVITY`, `SCHOLARSHIP`, `FACILITY`, `STUDENT_SUPPORT`) 중 하나를 반환합니다.
-신청 관련 공지는 `apply_method_type`(`EMAIL`, `OFFLINE`, `PORTAL`, `LINK`,
+신청 관련 공지는 `apply_method_type`(`FILE`, `OFFLINE`, `PORTAL`, `LINK`,
 `OTHER`)과 `apply_method_detail`, `is_applicable`을 함께 반환합니다.
 
 PDF 첨부는 OpenDataLoader로 Markdown/JSON 변환을 먼저 시도합니다. 성공한 PDF는
-추출 Markdown을 AI 입력 텍스트에 포함하고, 실패한 PDF와 비-PDF 첨부는 기존처럼
-OpenAI `input_file` URL로 전달합니다.
+추출 Markdown을 AI 입력 텍스트에 포함합니다. 실패한 PDF와 지원되는 문서 첨부는
+OpenAI `input_file` URL로 전달하고, 이미지 첨부는 `input_image`로 전달합니다.
+지원하지 않는 첨부는 warning 로그만 남기고 제외합니다.
 
 환경변수:
 
