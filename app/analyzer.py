@@ -4,7 +4,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Protocol
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from app.attachments import (
     PdfAttachmentPreprocessor,
@@ -25,25 +25,7 @@ TAG_CODES = (
     "STUDENT_SUPPORT",
 )
 OPENAI_IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
-OPENAI_FILE_EXTENSIONS = {
-    ".csv",
-    ".docx",
-    ".htm",
-    ".html",
-    ".json",
-    ".jsonl",
-    ".md",
-    ".markdown",
-    ".pdf",
-    ".pptx",
-    ".rtf",
-    ".txt",
-    ".xls",
-    ".xlsx",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
+OPENAI_FILE_EXTENSIONS = {".pdf"}
 
 ANALYSIS_INSTRUCTIONS = f"""
 You are the Campus Navi official-notice analysis engine.
@@ -63,7 +45,8 @@ Follow these rules:
 - Application dates are application/submission period dates, not event dates. Use YYYY-MM-DD and HH:mm:ss.
 - `apply_method_type`: FILE, OFFLINE, PORTAL, LINK, OTHER, or null.
 - `apply_method_detail`: return a value only when `apply_method_type` is OTHER. Otherwise return null.
-- `required_documents` and `eligibility`: preserve concise Korean text from the notice. Use newlines when multiple conditions are listed.
+- `required_documents`: use comma-separated concise Korean text for multiple documents.
+- `eligibility`: preserve concise Korean text from the notice. Use newlines when multiple conditions are listed.
 """.strip()
 
 
@@ -228,6 +211,11 @@ def _format_notice_text(
                 )
             )
 
+    unsupported_attachment_names = _unsupported_attachment_names(pdf_preprocess_result)
+    if unsupported_attachment_names:
+        lines.extend(("", "Skipped unsupported attachments"))
+        lines.extend(f"- {name}" for name in unsupported_attachment_names)
+
     return "\n".join(lines)
 
 
@@ -271,12 +259,53 @@ def _is_openai_file_url(url: str) -> bool:
     return _extension_from_url(url) in OPENAI_FILE_EXTENSIONS
 
 
+def _unsupported_attachment_names(
+    pdf_preprocess_result: PdfPreprocessResult | None,
+) -> list[str]:
+    if pdf_preprocess_result is None:
+        return []
+
+    return [
+        _attachment_filename_from_url(url)
+        for url in pdf_preprocess_result.fallback_urls
+        if not _is_openai_image_url(url) and not _is_openai_file_url(url)
+    ]
+
+
 def _extension_from_url(url: str) -> str:
     path = unquote(urlparse(url).path)
     filename = path.rsplit("/", 1)[-1]
     if "." not in filename:
         return ""
     return f".{filename.rsplit('.', 1)[-1].lower()}"
+
+
+def _attachment_filename_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    disposition = parse_qs(parsed.query).get("response-content-disposition", [""])[0]
+    filename = _filename_from_content_disposition(disposition)
+    if filename:
+        return filename
+
+    path_filename = unquote(parsed.path.rsplit("/", 1)[-1])
+    return path_filename or "attachment"
+
+
+def _filename_from_content_disposition(disposition: str) -> str | None:
+    for part in disposition.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key.lower() == "filename*":
+            value = value.strip().strip('"')
+            if "''" in value:
+                value = value.split("''", 1)[1]
+            return unquote(value)
+
+    for part in disposition.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key.lower() == "filename":
+            return value.strip().strip('"') or None
+
+    return None
 
 
 def _env_int(name: str, default: int) -> int:

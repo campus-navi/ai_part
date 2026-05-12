@@ -42,9 +42,9 @@ opendataloader-pdf-hybrid --port 5002 --force-ocr --ocr-lang "ko,en"
 `OTHER`)과 `apply_method_detail`, `is_applicable`을 함께 반환합니다.
 
 PDF 첨부는 OpenDataLoader로 Markdown/JSON 변환을 먼저 시도합니다. 성공한 PDF는
-추출 Markdown을 AI 입력 텍스트에 포함합니다. 실패한 PDF와 지원되는 문서 첨부는
-OpenAI `input_file` URL로 전달하고, 이미지 첨부는 `input_image`로 전달합니다.
-지원하지 않는 첨부는 warning 로그만 남기고 제외합니다.
+추출 Markdown을 AI 입력 텍스트에 포함합니다. 실패한 PDF는 OpenAI `input_file`
+URL로 전달하고, 이미지 첨부는 `input_image`로 전달합니다. 그 외 HWP/Office/ZIP
+첨부는 OpenAI 파일 입력에서 제외하고 파일명만 텍스트 힌트로 제공합니다.
 
 환경변수:
 
@@ -59,9 +59,11 @@ OpenAI `input_file` URL로 전달하고, 이미지 첨부는 `input_image`로 �
 - `PDF_MAX_FILES`: 선택, 기본값 `8`
 - `PDF_EXTRACTED_TEXT_MAX_CHARS`: 선택, 기본값 `60000`
 - `PDF_CONVERT_TIMEOUT_SECONDS`: 선택, 기본값 `180`
-- `OPENDATALOADER_HYBRID`: 선택, 기본값 `docling-fast`
+- `OPENDATALOADER_HYBRID`: 선택, 기본값 `docling-fast` (``, `off`, `none`이면 hybrid 비활성)
 - `OPENDATALOADER_HYBRID_MODE`: 선택, 기본값 `full`
 - `OPENDATALOADER_HYBRID_TIMEOUT_MS`: 선택, 기본값 `120000`
+- `OPENDATALOADER_QUIET`: 선택, 기본값 `false`
+- `OPENDATALOADER_HYBRID_FALLBACK`: 선택, 기본값 `true`
 
 ## 테스트
 

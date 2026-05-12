@@ -205,6 +205,13 @@ def test_normalize_response_clears_apply_method_detail_unless_other():
     assert normalized.apply_method_detail is None
 
 
+def test_analysis_instructions_keep_required_documents_concise():
+    from app.analyzer import ANALYSIS_INSTRUCTIONS
+
+    assert "required_documents" in ANALYSIS_INSTRUCTIONS
+    assert "comma-separated concise" in ANALYSIS_INSTRUCTIONS
+
+
 class FakeAttachmentPreprocessor:
     async def preprocess(self, urls: list[str]) -> PdfPreprocessResult:
         if not urls:
@@ -300,7 +307,7 @@ async def test_openai_analyzer_builds_multimodal_input_with_null_structured_text
 @pytest.mark.anyio
 async def test_openai_analyzer_filters_fallback_attachments_for_openai_support():
     analyzer = OpenAINoticeAnalyzer(
-        OpenAIAnalyzerConfig(max_images=2, max_attachments=4),
+        OpenAIAnalyzerConfig(max_images=2, max_attachments=6),
         attachment_preprocessor=FallbackOnlyAttachmentPreprocessor(),
     )
     request = OfficialProcessRequest(
@@ -311,6 +318,8 @@ async def test_openai_analyzer_filters_fallback_attachments_for_openai_support()
             "https://cdn.example.com/files/guide.hwp?X-Amz-Signature=def456",
             "https://cdn.example.com/files/fallback.pdf?X-Amz-Signature=ghi789",
             "https://cdn.example.com/files/archive.zip?X-Amz-Signature=jkl012",
+            "https://cdn.example.com/files/form.docx?X-Amz-Signature=pqr678",
+            "https://cdn.example.com/files/sheet.xlsx?X-Amz-Signature=stu901",
             "https://cdn.example.com/files/poster.webp?X-Amz-Signature=mno345",
         ],
     )
@@ -320,6 +329,13 @@ async def test_openai_analyzer_filters_fallback_attachments_for_openai_support()
     content = payload[0]["content"]
     assert {"type": "input_file", "file_url": request.attachment_urls[1]} in content
     assert all(item.get("filename") is None for item in content)
-    assert {"type": "input_image", "image_url": request.attachment_urls[3], "detail": "auto"} in content
-    assert not any("guide.hwp" in str(item) for item in content)
-    assert not any("archive.zip" in str(item) for item in content)
+    assert {"type": "input_image", "image_url": request.attachment_urls[5], "detail": "auto"} in content
+    assert not any("guide.hwp" in str(item) for item in content[1:])
+    assert not any("archive.zip" in str(item) for item in content[1:])
+    assert not any(item.get("file_url", "").endswith(".docx?X-Amz-Signature=pqr678") for item in content)
+    assert not any(item.get("file_url", "").endswith(".xlsx?X-Amz-Signature=stu901") for item in content)
+    assert "Skipped unsupported attachments" in content[0]["text"]
+    assert "guide.hwp" in content[0]["text"]
+    assert "archive.zip" in content[0]["text"]
+    assert "form.docx" in content[0]["text"]
+    assert "sheet.xlsx" in content[0]["text"]

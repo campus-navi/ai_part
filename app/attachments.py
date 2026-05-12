@@ -22,9 +22,11 @@ class PdfPreprocessConfig:
     max_files: int = 8
     extracted_text_max_chars: int = 60_000
     convert_timeout_seconds: float = 180
-    hybrid: str = "docling-fast"
+    hybrid: str | None = "docling-fast"
     hybrid_mode: str = "full"
     hybrid_timeout_ms: int = 120_000
+    quiet: bool = False
+    hybrid_fallback: bool = True
 
     @classmethod
     def from_env(cls) -> PdfPreprocessConfig:
@@ -44,11 +46,16 @@ class PdfPreprocessConfig:
                 "PDF_CONVERT_TIMEOUT_SECONDS",
                 cls.convert_timeout_seconds,
             ),
-            hybrid=os.getenv("OPENDATALOADER_HYBRID", cls.hybrid),
+            hybrid=_env_hybrid("OPENDATALOADER_HYBRID", cls.hybrid),
             hybrid_mode=os.getenv("OPENDATALOADER_HYBRID_MODE", cls.hybrid_mode),
             hybrid_timeout_ms=_env_int(
                 "OPENDATALOADER_HYBRID_TIMEOUT_MS",
                 cls.hybrid_timeout_ms,
+            ),
+            quiet=_env_bool("OPENDATALOADER_QUIET", cls.quiet),
+            hybrid_fallback=_env_bool(
+                "OPENDATALOADER_HYBRID_FALLBACK",
+                cls.hybrid_fallback,
             ),
         )
 
@@ -134,6 +141,8 @@ class HttpxPdfDownloader:
         parsed = urlparse(url)
         if parsed.scheme != "https":
             raise UnsupportedAttachmentError("only https PDF URLs are preprocessed")
+        if _has_clear_non_pdf_extension(url):
+            raise UnsupportedAttachmentError("attachment URL extension is not PDF")
 
         filename = safe_filename_from_url(url, default="attachment.pdf")
         if not filename.lower().endswith(".pdf"):
@@ -189,17 +198,54 @@ class OpenDataLoaderConverter:
         try:
             import opendataloader_pdf
 
-            opendataloader_pdf.convert(
-                input_path=[str(path) for path in input_paths],
-                output_dir=str(output_dir),
-                format="markdown,json",
-                hybrid=config.hybrid,
-                hybrid_mode=config.hybrid_mode,
-                hybrid_timeout=str(config.hybrid_timeout_ms),
-                quiet=True,
+            hybrid = _normalize_hybrid(config.hybrid)
+            self._convert_with_options(
+                opendataloader_pdf,
+                input_paths,
+                output_dir,
+                config,
+                hybrid=hybrid,
             )
         except Exception as exc:
+            if _normalize_hybrid(config.hybrid) and config.hybrid_fallback:
+                try:
+                    import opendataloader_pdf
+
+                    self._convert_with_options(
+                        opendataloader_pdf,
+                        input_paths,
+                        output_dir,
+                        config,
+                        hybrid=None,
+                    )
+                    return
+                except Exception as fallback_exc:
+                    raise PdfConverterError(
+                        f"OpenDataLoader conversion failed: {exc}; "
+                        f"Java fallback failed: {fallback_exc}"
+                    ) from fallback_exc
+
             raise PdfConverterError(f"OpenDataLoader conversion failed: {exc}") from exc
+
+    def _convert_with_options(
+        self,
+        opendataloader_pdf,
+        input_paths: list[Path],
+        output_dir: Path,
+        config: PdfPreprocessConfig,
+        *,
+        hybrid: str | None,
+    ) -> None:
+        opendataloader_pdf.convert(
+            input_path=[str(path) for path in input_paths],
+            output_dir=str(output_dir),
+            format="markdown,json",
+            hybrid=hybrid,
+            hybrid_mode=config.hybrid_mode if hybrid else None,
+            hybrid_timeout=str(config.hybrid_timeout_ms) if hybrid else None,
+            hybrid_fallback=config.hybrid_fallback,
+            quiet=config.quiet,
+        )
 
 
 class OpenDataLoaderPreflight:
@@ -370,6 +416,23 @@ def safe_filename_from_url(url: str, *, default: str = "attachment") -> str:
     return name or default
 
 
+def _has_clear_non_pdf_extension(url: str) -> bool:
+    path = unquote(urlparse(url).path)
+    filename = path.rsplit("/", 1)[-1]
+    if "." not in filename:
+        return False
+    return f".{filename.rsplit('.', 1)[-1].lower()}" != ".pdf"
+
+
+def _normalize_hybrid(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if normalized.lower() in {"", "off", "none", "false", "0"}:
+        return None
+    return normalized
+
+
 def _unique_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -387,6 +450,12 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw_value is None:
         return default
     return raw_value.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_hybrid(name: str, default: str | None) -> str | None:
+    if name not in os.environ:
+        return default
+    return _normalize_hybrid(os.environ[name])
 
 
 def _env_float(name: str, default: float) -> float:

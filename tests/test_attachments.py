@@ -6,6 +6,7 @@ import pytest
 from app.attachments import (
     DownloadedPdf,
     HttpxPdfDownloader,
+    OpenDataLoaderConverter,
     PdfAttachmentPreprocessor,
     PdfConverterError,
     PdfDownloadError,
@@ -203,7 +204,7 @@ async def test_httpx_downloader_rejects_non_pdf_content_type(tmp_path):
 
     with pytest.raises(UnsupportedAttachmentError, match="attachment is not a PDF"):
         await downloader.download_pdf(
-            "https://cdn.example.com/files/notice.txt",
+            "https://cdn.example.com/files/notice",
             tmp_path,
             max_bytes=1024,
             timeout_seconds=1,
@@ -248,3 +249,88 @@ async def test_httpx_downloader_wraps_timeout(tmp_path):
             max_bytes=1024,
             timeout_seconds=1,
         )
+
+
+@pytest.mark.anyio
+async def test_httpx_downloader_skips_clear_non_pdf_extension_without_network(tmp_path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("non-PDF attachments should not be downloaded")
+
+    downloader = HttpxPdfDownloader(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(UnsupportedAttachmentError, match="extension is not PDF"):
+        await downloader.download_pdf(
+            "https://cdn.example.com/files/notice.docx",
+            tmp_path,
+            max_bytes=1024,
+            timeout_seconds=1,
+        )
+
+
+def test_opendataloader_converter_passes_runtime_options(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class FakeOpenDataLoader:
+        @staticmethod
+        def convert(**kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(__import__("sys").modules, "opendataloader_pdf", FakeOpenDataLoader)
+
+    converter = OpenDataLoaderConverter()
+    input_pdf = tmp_path / "notice.pdf"
+    input_pdf.write_bytes(b"%PDF-1.7")
+
+    converter.convert(
+        [input_pdf],
+        tmp_path / "out",
+        PdfPreprocessConfig(
+            hybrid="",
+            hybrid_mode="full",
+            hybrid_timeout_ms=120_000,
+            quiet=False,
+            hybrid_fallback=True,
+        ),
+    )
+
+    assert captured["hybrid"] is None
+    assert captured["hybrid_mode"] is None
+    assert captured["hybrid_timeout"] is None
+    assert captured["quiet"] is False
+    assert captured["hybrid_fallback"] is True
+
+
+def test_opendataloader_converter_retries_java_only_when_hybrid_fails(
+    monkeypatch,
+    tmp_path,
+):
+    calls: list[dict[str, object]] = []
+
+    class FakeOpenDataLoader:
+        @staticmethod
+        def convert(**kwargs):
+            calls.append(kwargs)
+            if kwargs["hybrid"] == "docling-fast":
+                raise RuntimeError("Hybrid server is not available")
+
+    monkeypatch.setitem(__import__("sys").modules, "opendataloader_pdf", FakeOpenDataLoader)
+
+    converter = OpenDataLoaderConverter()
+    input_pdf = tmp_path / "notice.pdf"
+    input_pdf.write_bytes(b"%PDF-1.7")
+
+    converter.convert(
+        [input_pdf],
+        tmp_path / "out",
+        PdfPreprocessConfig(
+            hybrid="docling-fast",
+            hybrid_mode="full",
+            quiet=False,
+            hybrid_fallback=True,
+        ),
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["hybrid"] == "docling-fast"
+    assert calls[1]["hybrid"] is None
+    assert calls[1]["hybrid_mode"] is None
