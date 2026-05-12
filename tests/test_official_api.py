@@ -2,7 +2,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.attachments import ExtractedPdfAttachment, PdfPreprocessResult
-from app.analyzer import OpenAIAnalyzerConfig, OpenAINoticeAnalyzer, _normalize_response
+from app.analyzer import (
+    OpenAIAnalyzerConfig,
+    OpenAINoticeAnalyzer,
+    _has_analysis_source,
+    _normalize_response,
+)
 from app.main import app, get_notice_analyzer
 from app.models import OfficialProcessRequest, OfficialProcessResponse
 
@@ -13,8 +18,8 @@ class FakeAnalyzer:
 
     async def analyze(self, request: OfficialProcessRequest) -> OfficialProcessResponse:
         self.requests.append(request)
-        if not request.structured_text.strip():
-            raise ValueError("structured_text must not be blank")
+        if not _has_analysis_source(request):
+            raise ValueError("structured_text, image_urls, or attachment_urls must include content")
 
         return OfficialProcessResponse(
             summary="2026학년도 2학기 교내장학금 신청 안내입니다.",
@@ -87,6 +92,26 @@ def test_process_official_notice_returns_ai_response(fake_analyzer: FakeAnalyzer
     assert fake_analyzer.requests[0].attachment_urls == ["https://s3.amazonaws.com/example/notice.pdf"]
 
 
+def test_process_official_notice_accepts_null_structured_text_with_image(
+    fake_analyzer: FakeAnalyzer,
+):
+    client = TestClient(app)
+
+    response = client.post(
+        "/ai/official/process",
+        json={
+            "post_id": 124,
+            "structured_text": None,
+            "image_urls": ["https://cdn.example.com/image-only-notice.png"],
+            "attachment_urls": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_analyzer.requests[0].structured_text is None
+    assert fake_analyzer.requests[0].image_urls == ["https://cdn.example.com/image-only-notice.png"]
+
+
 def test_batch_process_keeps_successes_when_one_item_fails(fake_analyzer: FakeAnalyzer):
     client = TestClient(app)
 
@@ -156,6 +181,9 @@ def test_normalize_response_clears_application_fields_when_not_applicable():
 
 class FakeAttachmentPreprocessor:
     async def preprocess(self, urls: list[str]) -> PdfPreprocessResult:
+        if not urls:
+            return PdfPreprocessResult()
+
         return PdfPreprocessResult(
             extracted=[
                 ExtractedPdfAttachment(
@@ -209,3 +237,28 @@ async def test_openai_analyzer_builds_multimodal_input():
         "filename": "extra.pdf",
     }
     assert len(content) == 3
+
+
+@pytest.mark.anyio
+async def test_openai_analyzer_builds_multimodal_input_with_null_structured_text():
+    analyzer = OpenAINoticeAnalyzer(
+        OpenAIAnalyzerConfig(max_images=1, max_attachments=2),
+        attachment_preprocessor=FakeAttachmentPreprocessor(),
+    )
+    request = OfficialProcessRequest(
+        post_id=124,
+        structured_text=None,
+        image_urls=["https://cdn.example.com/image-only-notice.png"],
+        attachment_urls=[],
+    )
+
+    payload = await analyzer._build_input(request)
+
+    content = payload[0]["content"]
+    assert content[0]["type"] == "input_text"
+    assert content[0]["text"] == "post_id: 124\nstructured_text:\n"
+    assert content[1] == {
+        "type": "input_image",
+        "image_url": "https://cdn.example.com/image-only-notice.png",
+        "detail": "auto",
+    }

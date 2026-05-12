@@ -18,7 +18,7 @@ class OfficialProcessRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     post_id: int | None = None
-    structured_text: str
+    structured_text: str | None = None
     image_urls: list[str] = Field(default_factory=list)
     attachment_urls: list[str] = Field(default_factory=list)
 

@@ -91,8 +91,8 @@ class OpenAINoticeAnalyzer:
         return self.attachment_preprocessor.check_preflight().warnings
 
     async def analyze(self, request: OfficialProcessRequest) -> OfficialProcessResponse:
-        if not request.structured_text.strip():
-            raise ValueError("structured_text must not be blank")
+        if not _has_analysis_source(request):
+            raise ValueError("structured_text, image_urls, or attachment_urls must include content")
 
         try:
             response = await self._get_client().responses.parse(
@@ -168,7 +168,7 @@ def _format_notice_text(
     lines = [
         f"post_id: {request.post_id}",
         "structured_text:",
-        request.structured_text.strip(),
+        _structured_text(request),
     ]
     if pdf_preprocess_result and pdf_preprocess_result.extracted:
         lines.extend(
@@ -208,6 +208,14 @@ def _normalize_response(response: OfficialProcessResponse) -> OfficialProcessRes
             "eligibility": None,
         }
     )
+
+
+def _has_analysis_source(request: OfficialProcessRequest) -> bool:
+    return bool(_structured_text(request) or request.image_urls or request.attachment_urls)
+
+
+def _structured_text(request: OfficialProcessRequest) -> str:
+    return (request.structured_text or "").strip()
 
 
 def _filename_from_url(url: str) -> str:
