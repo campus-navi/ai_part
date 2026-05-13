@@ -55,6 +55,10 @@ async def process_official_notice(
     except AnalyzerExecutionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 
 @app.post("/ai/official/process/batch", response_model=BatchProcessResponse)
 async def process_official_notice_batch(
