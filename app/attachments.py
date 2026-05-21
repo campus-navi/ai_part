@@ -9,9 +9,12 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
+
+
+HWP_EXTENSIONS = {".hwp", ".hwpx"}
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,44 @@ class PdfPreprocessConfig:
 
 
 @dataclass(frozen=True)
+class HwpPreprocessConfig:
+    enabled: bool = True
+    download_timeout_seconds: float = 10
+    max_bytes: int = 10_485_760
+    max_files: int = 8
+    extracted_text_max_chars: int = 60_000
+    extract_timeout_seconds: float = 60
+
+    @classmethod
+    def from_env(cls) -> HwpPreprocessConfig:
+        return cls(
+            enabled=_env_bool("HWP_PREPROCESS_ENABLED", cls.enabled),
+            download_timeout_seconds=_env_float(
+                "HWP_DOWNLOAD_TIMEOUT_SECONDS",
+                cls.download_timeout_seconds,
+            ),
+            max_bytes=_env_int("HWP_MAX_BYTES", cls.max_bytes),
+            max_files=_env_int("HWP_MAX_FILES", cls.max_files),
+            extracted_text_max_chars=_env_int(
+                "HWP_EXTRACTED_TEXT_MAX_CHARS",
+                cls.extracted_text_max_chars,
+            ),
+            extract_timeout_seconds=_env_float(
+                "HWP_EXTRACT_TIMEOUT_SECONDS",
+                cls.extract_timeout_seconds,
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class DownloadedPdf:
+    url: str
+    path: Path
+    filename: str
+
+
+@dataclass(frozen=True)
+class DownloadedHwpAttachment:
     url: str
     path: Path
     filename: str
@@ -75,8 +115,22 @@ class ExtractedPdfAttachment:
 
 
 @dataclass(frozen=True)
+class ExtractedHwpAttachment:
+    url: str
+    filename: str
+    text: str
+
+
+@dataclass(frozen=True)
 class PdfPreprocessResult:
     extracted: list[ExtractedPdfAttachment] = field(default_factory=list)
+    fallback_urls: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class HwpPreprocessResult:
+    extracted: list[ExtractedHwpAttachment] = field(default_factory=list)
     fallback_urls: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -91,11 +145,19 @@ class PdfDownloadError(RuntimeError):
     pass
 
 
+class HwpDownloadError(RuntimeError):
+    pass
+
+
 class UnsupportedAttachmentError(RuntimeError):
     pass
 
 
 class PdfConverterError(RuntimeError):
+    pass
+
+
+class HwpExtractError(RuntimeError):
     pass
 
 
@@ -111,6 +173,18 @@ class PdfDownloader(Protocol):
         ...
 
 
+class HwpDownloader(Protocol):
+    async def download_hwp(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        max_bytes: int,
+        timeout_seconds: float,
+    ) -> DownloadedHwpAttachment:
+        ...
+
+
 class PdfConverter(Protocol):
     def convert(
         self,
@@ -118,6 +192,11 @@ class PdfConverter(Protocol):
         output_dir: Path,
         config: PdfPreprocessConfig,
     ) -> None:
+        ...
+
+
+class HwpTextExtractor(Protocol):
+    def extract(self, path: Path) -> str:
         ...
 
 
@@ -190,6 +269,64 @@ class HttpxPdfDownloader:
         return DownloadedPdf(url=url, path=output_path, filename=output_path.name)
 
 
+class HttpxHwpDownloader:
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self.transport = transport
+
+    async def download_hwp(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        max_bytes: int,
+        timeout_seconds: float,
+    ) -> DownloadedHwpAttachment:
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise UnsupportedAttachmentError("only https HWP/HWPX URLs are preprocessed")
+        if _has_clear_non_hwp_extension(url):
+            raise UnsupportedAttachmentError("attachment URL extension is not HWP/HWPX")
+
+        extension = _extension_from_attachment_url(url)
+        filename = safe_filename_from_url(url, default=f"attachment{extension or '.hwp'}")
+        if Path(filename).suffix.lower() not in HWP_EXTENSIONS:
+            filename = f"{filename}{extension if extension in HWP_EXTENSIONS else '.hwp'}"
+        output_path = _unique_path(destination / filename)
+
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout_seconds,
+                transport=self.transport,
+            ) as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None and int(content_length) > max_bytes:
+                        raise HwpDownloadError("HWP/HWPX exceeds configured size limit")
+
+                    total = 0
+                    with output_path.open("wb") as file:
+                        async for chunk in response.aiter_bytes():
+                            total += len(chunk)
+                            if total > max_bytes:
+                                raise HwpDownloadError("HWP/HWPX exceeds configured size limit")
+                            file.write(chunk)
+        except UnsupportedAttachmentError:
+            raise
+        except HwpDownloadError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise HwpDownloadError(f"HWP/HWPX download timed out: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise HwpDownloadError(f"HWP/HWPX download failed: {exc}") from exc
+        except ValueError as exc:
+            raise HwpDownloadError(f"invalid HWP/HWPX response headers: {exc}") from exc
+
+        return DownloadedHwpAttachment(url=url, path=output_path, filename=output_path.name)
+
+
 class OpenDataLoaderConverter:
     def convert(
         self,
@@ -250,6 +387,28 @@ class OpenDataLoaderConverter:
         )
 
 
+class RhwpTextExtractor:
+    def extract(self, path: Path) -> str:
+        try:
+            import rhwp
+        except ImportError as exc:
+            raise HwpExtractError("rhwp-python package is not installed") from exc
+
+        try:
+            document = rhwp.parse(str(path))
+            text = (document.extract_text() or "").strip()
+            if not text:
+                paragraphs = [item for item in document.paragraphs() if item.strip()]
+                text = "\n".join(paragraphs).strip()
+        except Exception as exc:
+            raise HwpExtractError(f"rhwp extraction failed: {exc}") from exc
+
+        if not text:
+            raise HwpExtractError("rhwp extracted no text")
+
+        return text
+
+
 class OpenDataLoaderPreflight:
     def __init__(self) -> None:
         self._cached: PreflightResult | None = None
@@ -271,6 +430,22 @@ class OpenDataLoaderPreflight:
 
         if importlib.util.find_spec("opendataloader_pdf") is None:
             warnings.append("opendataloader_pdf package is not installed")
+
+        self._cached = PreflightResult(available=not warnings, warnings=warnings)
+        return self._cached
+
+
+class RhwpPreflight:
+    def __init__(self) -> None:
+        self._cached: PreflightResult | None = None
+
+    def check(self) -> PreflightResult:
+        if self._cached is not None:
+            return self._cached
+
+        warnings: list[str] = []
+        if importlib.util.find_spec("rhwp") is None:
+            warnings.append("rhwp-python package is not installed")
 
         self._cached = PreflightResult(available=not warnings, warnings=warnings)
         return self._cached
@@ -377,6 +552,109 @@ class PdfAttachmentPreprocessor:
             )
 
 
+class HwpAttachmentPreprocessor:
+    def __init__(
+        self,
+        config: HwpPreprocessConfig | None = None,
+        downloader: HwpDownloader | None = None,
+        extractor: HwpTextExtractor | None = None,
+        preflight: PreflightChecker | None = None,
+    ) -> None:
+        self.config = config or HwpPreprocessConfig.from_env()
+        self.downloader = downloader or HttpxHwpDownloader()
+        self.extractor = extractor or RhwpTextExtractor()
+        self.preflight = preflight or RhwpPreflight()
+
+    def check_preflight(self) -> PreflightResult:
+        if not self.config.enabled:
+            return PreflightResult(available=False, warnings=["HWP/HWPX preprocessing is disabled"])
+        return self.preflight.check()
+
+    async def preprocess(self, urls: list[str]) -> HwpPreprocessResult:
+        if not self.config.enabled:
+            return HwpPreprocessResult(fallback_urls=list(urls))
+
+        warnings: list[str] = []
+        preflight = self.preflight.check()
+        if not preflight.available:
+            warnings.extend(preflight.warnings)
+            return HwpPreprocessResult(fallback_urls=list(urls), warnings=warnings)
+
+        fallback_urls: list[str] = []
+        extracted: list[ExtractedHwpAttachment] = []
+        remaining_chars = self.config.extracted_text_max_chars
+        processed_files = 0
+
+        with tempfile.TemporaryDirectory(prefix="campus-navi-hwp-") as temp_root:
+            temp_dir = Path(temp_root)
+            input_dir = temp_dir / "input"
+            input_dir.mkdir()
+
+            for url in urls:
+                if processed_files >= self.config.max_files:
+                    fallback_urls.append(url)
+                    warnings.append(f"HWP/HWPX preprocessing skipped max_files limit: {url}")
+                    continue
+
+                try:
+                    downloaded_hwp = await self.downloader.download_hwp(
+                        url,
+                        input_dir,
+                        max_bytes=self.config.max_bytes,
+                        timeout_seconds=self.config.download_timeout_seconds,
+                    )
+                    processed_files += 1
+                except UnsupportedAttachmentError as exc:
+                    fallback_urls.append(url)
+                    warnings.append(f"HWP/HWPX preprocessing skipped {url}: {exc}")
+                    continue
+                except HwpDownloadError as exc:
+                    fallback_urls.append(url)
+                    warnings.append(f"HWP/HWPX preprocessing download failed {url}: {exc}")
+                    continue
+
+                try:
+                    text = await asyncio.wait_for(
+                        asyncio.to_thread(self.extractor.extract, downloaded_hwp.path),
+                        timeout=self.config.extract_timeout_seconds,
+                    )
+                except HwpExtractError as exc:
+                    fallback_urls.append(url)
+                    warnings.append(f"HWP/HWPX preprocessing extraction failed {url}: {exc}")
+                    continue
+                except asyncio.TimeoutError:
+                    fallback_urls.append(url)
+                    warnings.append(f"HWP/HWPX preprocessing extraction timed out: {url}")
+                    continue
+
+                text = text.strip()
+                if not text:
+                    fallback_urls.append(url)
+                    warnings.append(f"HWP/HWPX preprocessing produced no text: {url}")
+                    continue
+                if remaining_chars <= 0:
+                    fallback_urls.append(url)
+                    warnings.append(f"HWP/HWPX preprocessing skipped text limit: {url}")
+                    continue
+                if len(text) > remaining_chars:
+                    text = f"{text[:remaining_chars]}\n\n[HWP/HWPX text truncated]"
+                remaining_chars -= len(text)
+
+                extracted.append(
+                    ExtractedHwpAttachment(
+                        url=url,
+                        filename=downloaded_hwp.filename,
+                        text=text,
+                    )
+                )
+
+        return HwpPreprocessResult(
+            extracted=extracted,
+            fallback_urls=fallback_urls,
+            warnings=warnings,
+        )
+
+
 def _read_extracted_markdown(
     downloaded: list[DownloadedPdf],
     output_dir: Path,
@@ -424,12 +702,44 @@ def safe_filename_from_url(url: str, *, default: str = "attachment") -> str:
     return name or default
 
 
+def _attachment_filename_from_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    disposition = parse_qs(parsed.query).get("response-content-disposition", [""])[0]
+    for part in disposition.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key.lower() == "filename*":
+            value = value.strip().strip('"')
+            if "''" in value:
+                value = value.split("''", 1)[1]
+            return unquote(value)
+
+    for part in disposition.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key.lower() == "filename":
+            return value.strip().strip('"') or None
+
+    path_filename = unquote(parsed.path.rsplit("/", 1)[-1])
+    return path_filename or None
+
+
+def _extension_from_attachment_url(url: str) -> str:
+    filename = _attachment_filename_from_url(url)
+    if not filename or "." not in filename:
+        return ""
+    return f".{filename.rsplit('.', 1)[-1].lower()}"
+
+
 def _has_clear_non_pdf_extension(url: str) -> bool:
     path = unquote(urlparse(url).path)
     filename = path.rsplit("/", 1)[-1]
     if "." not in filename:
         return False
     return f".{filename.rsplit('.', 1)[-1].lower()}" != ".pdf"
+
+
+def _has_clear_non_hwp_extension(url: str) -> bool:
+    extension = _extension_from_attachment_url(url)
+    return bool(extension and extension not in HWP_EXTENSIONS)
 
 
 def _normalize_hybrid(value: str | None) -> str | None:

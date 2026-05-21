@@ -1,7 +1,12 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app.attachments import ExtractedPdfAttachment, PdfPreprocessResult
+from app.attachments import (
+    ExtractedHwpAttachment,
+    ExtractedPdfAttachment,
+    HwpPreprocessResult,
+    PdfPreprocessResult,
+)
 from app.analyzer import (
     OpenAIAnalyzerConfig,
     OpenAINoticeAnalyzer,
@@ -240,11 +245,41 @@ class FallbackOnlyAttachmentPreprocessor:
         return type("Preflight", (), {"warnings": []})()
 
 
+class FakeHwpAttachmentPreprocessor:
+    async def preprocess(self, urls: list[str]) -> HwpPreprocessResult:
+        extracted = [
+            ExtractedHwpAttachment(
+                url=url,
+                filename=url.rsplit("/", 1)[-1].split("?", 1)[0],
+                text="교내장학금 신청서와 개인정보 동의서를 제출해야 합니다.",
+            )
+            for url in urls
+            if url.split("?", 1)[0].lower().endswith((".hwp", ".hwpx"))
+        ]
+        extracted_urls = {item.url for item in extracted}
+        return HwpPreprocessResult(
+            extracted=extracted,
+            fallback_urls=[url for url in urls if url not in extracted_urls],
+        )
+
+    def check_preflight(self):
+        return type("Preflight", (), {"warnings": []})()
+
+
+class NoopHwpAttachmentPreprocessor:
+    async def preprocess(self, urls: list[str]) -> HwpPreprocessResult:
+        return HwpPreprocessResult(fallback_urls=urls)
+
+    def check_preflight(self):
+        return type("Preflight", (), {"warnings": []})()
+
+
 @pytest.mark.anyio
 async def test_openai_analyzer_builds_multimodal_input():
     analyzer = OpenAINoticeAnalyzer(
         OpenAIAnalyzerConfig(max_images=1, max_attachments=2),
         attachment_preprocessor=FakeAttachmentPreprocessor(),
+        hwp_attachment_preprocessor=NoopHwpAttachmentPreprocessor(),
     )
     request = OfficialProcessRequest(
         post_id=123,
@@ -284,6 +319,7 @@ async def test_openai_analyzer_builds_multimodal_input_with_null_structured_text
     analyzer = OpenAINoticeAnalyzer(
         OpenAIAnalyzerConfig(max_images=1, max_attachments=2),
         attachment_preprocessor=FakeAttachmentPreprocessor(),
+        hwp_attachment_preprocessor=NoopHwpAttachmentPreprocessor(),
     )
     request = OfficialProcessRequest(
         post_id=124,
@@ -309,6 +345,7 @@ async def test_openai_analyzer_filters_fallback_attachments_for_openai_support()
     analyzer = OpenAINoticeAnalyzer(
         OpenAIAnalyzerConfig(max_images=2, max_attachments=8),
         attachment_preprocessor=FallbackOnlyAttachmentPreprocessor(),
+        hwp_attachment_preprocessor=NoopHwpAttachmentPreprocessor(),
     )
     request = OfficialProcessRequest(
         post_id=3,
@@ -352,6 +389,7 @@ async def test_openai_analyzer_uses_content_disposition_filename_for_file_suppor
     analyzer = OpenAINoticeAnalyzer(
         OpenAIAnalyzerConfig(max_images=2, max_attachments=3),
         attachment_preprocessor=FallbackOnlyAttachmentPreprocessor(),
+        hwp_attachment_preprocessor=NoopHwpAttachmentPreprocessor(),
     )
     request = OfficialProcessRequest(
         post_id=4,
@@ -371,3 +409,33 @@ async def test_openai_analyzer_uses_content_disposition_filename_for_file_suppor
     assert {"type": "input_file", "file_url": request.attachment_urls[0]} in content
     assert {"type": "input_file", "file_url": request.attachment_urls[1]} in content
     assert "Skipped unsupported attachments" not in content[0]["text"]
+
+
+@pytest.mark.anyio
+async def test_openai_analyzer_includes_extracted_hwp_and_hwpx_text():
+    analyzer = OpenAINoticeAnalyzer(
+        OpenAIAnalyzerConfig(max_images=2, max_attachments=4),
+        attachment_preprocessor=FallbackOnlyAttachmentPreprocessor(),
+        hwp_attachment_preprocessor=FakeHwpAttachmentPreprocessor(),
+    )
+    request = OfficialProcessRequest(
+        post_id=5,
+        structured_text="첨부 양식을 확인하세요.",
+        attachment_urls=[
+            "https://cdn.example.com/files/guide.hwp?X-Amz-Signature=abc123",
+            "https://cdn.example.com/files/form.hwpx?X-Amz-Signature=def456",
+            "https://cdn.example.com/files/archive.zip?X-Amz-Signature=ghi789",
+        ],
+    )
+
+    payload = await analyzer._build_input(request)
+
+    content = payload[0]["content"]
+    assert not any("guide.hwp" in str(item) for item in content[1:])
+    assert not any("form.hwpx" in str(item) for item in content[1:])
+    assert "HWP/HWPX attachments extracted by rhwp" in content[0]["text"]
+    assert "교내장학금 신청서와 개인정보 동의서를 제출해야 합니다." in content[0]["text"]
+    assert "Skipped unsupported attachments" in content[0]["text"]
+    assert "archive.zip" in content[0]["text"]
+    assert "guide.hwp" not in content[0]["text"].split("Skipped unsupported attachments", 1)[1]
+    assert "form.hwpx" not in content[0]["text"].split("Skipped unsupported attachments", 1)[1]

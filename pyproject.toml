@@ -9,6 +9,7 @@ dependencies = [
     "openai",
     "opendataloader-pdf[hybrid]",
     "python-dotenv",
+    "rhwp-python",
     "uvicorn[standard]",
 ]
 

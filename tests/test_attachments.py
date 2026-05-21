@@ -5,6 +5,11 @@ import pytest
 
 from app.attachments import (
     DownloadedPdf,
+    DownloadedHwpAttachment,
+    ExtractedHwpAttachment,
+    HwpAttachmentPreprocessor,
+    HwpExtractError,
+    HwpPreprocessConfig,
     HttpxPdfDownloader,
     OpenDataLoaderConverter,
     PdfAttachmentPreprocessor,
@@ -99,6 +104,43 @@ class SlowConverter:
         time.sleep(0.05)
 
 
+class FakeHwpDownloader:
+    async def download_hwp(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        max_bytes: int,
+        timeout_seconds: float,
+    ) -> DownloadedHwpAttachment:
+        filename = safe_filename_from_url(url, default="attachment.hwp")
+        path = destination / filename
+        path.write_bytes(b"hwp bytes")
+        return DownloadedHwpAttachment(url=url, path=path, filename=filename)
+
+
+class SkippingHwpDownloader:
+    async def download_hwp(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        max_bytes: int,
+        timeout_seconds: float,
+    ) -> DownloadedHwpAttachment:
+        raise UnsupportedAttachmentError("attachment URL extension is not HWP/HWPX")
+
+
+class FakeHwpExtractor:
+    def extract(self, path: Path) -> str:
+        return f"{path.name} 신청서 제출 안내"
+
+
+class FailingHwpExtractor:
+    def extract(self, path: Path) -> str:
+        raise HwpExtractError("rhwp parse failed")
+
+
 def test_safe_filename_from_url_uses_ascii_only_for_java_compatibility():
     filename = safe_filename_from_url(
         "https://cdn.example.com/files/2026%ED%95%99%EB%85%84%EB%8F%84%20%ED%9B%84%EA%B8%B0%20%EC%9E%85%EC%8B%9C%20%EC%95%88%EB%82%B4%EB%AC%B8.pdf"
@@ -124,6 +166,84 @@ async def test_preprocess_extracts_pdf_markdown_and_omits_fallback_url():
     assert result.extracted[0].url == "https://cdn.example.com/files/notice.pdf"
     assert result.extracted[0].filename == "notice.pdf"
     assert "# PDF 안내" in result.extracted[0].markdown
+
+
+@pytest.mark.anyio
+async def test_hwp_preprocess_extracts_text_and_omits_fallback_url():
+    preprocessor = HwpAttachmentPreprocessor(
+        config=HwpPreprocessConfig(),
+        downloader=FakeHwpDownloader(),
+        extractor=FakeHwpExtractor(),
+        preflight=PassingPreflight(),
+    )
+
+    result = await preprocessor.preprocess(
+        [
+            "https://cdn.example.com/files/notice.hwp",
+            "https://cdn.example.com/files/form.hwpx",
+        ]
+    )
+
+    assert result.fallback_urls == []
+    assert result.warnings == []
+    assert result.extracted == [
+        ExtractedHwpAttachment(
+            url="https://cdn.example.com/files/notice.hwp",
+            filename="notice.hwp",
+            text="notice.hwp 신청서 제출 안내",
+        ),
+        ExtractedHwpAttachment(
+            url="https://cdn.example.com/files/form.hwpx",
+            filename="form.hwpx",
+            text="form.hwpx 신청서 제출 안내",
+        ),
+    ]
+
+
+@pytest.mark.anyio
+async def test_hwp_preprocess_falls_back_for_unsupported_attachment():
+    preprocessor = HwpAttachmentPreprocessor(
+        config=HwpPreprocessConfig(),
+        downloader=SkippingHwpDownloader(),
+        extractor=FakeHwpExtractor(),
+        preflight=PassingPreflight(),
+    )
+
+    result = await preprocessor.preprocess(["https://cdn.example.com/files/archive.zip"])
+
+    assert result.extracted == []
+    assert result.fallback_urls == ["https://cdn.example.com/files/archive.zip"]
+    assert "extension is not HWP/HWPX" in result.warnings[0]
+
+
+@pytest.mark.anyio
+async def test_hwp_preprocess_falls_back_when_extraction_fails():
+    preprocessor = HwpAttachmentPreprocessor(
+        config=HwpPreprocessConfig(),
+        downloader=FakeHwpDownloader(),
+        extractor=FailingHwpExtractor(),
+        preflight=PassingPreflight(),
+    )
+
+    result = await preprocessor.preprocess(["https://cdn.example.com/files/notice.hwp"])
+
+    assert result.extracted == []
+    assert result.fallback_urls == ["https://cdn.example.com/files/notice.hwp"]
+    assert "rhwp parse failed" in result.warnings[0]
+
+
+@pytest.mark.anyio
+async def test_hwp_preprocess_truncates_extracted_text():
+    preprocessor = HwpAttachmentPreprocessor(
+        config=HwpPreprocessConfig(extracted_text_max_chars=10),
+        downloader=FakeHwpDownloader(),
+        extractor=FakeHwpExtractor(),
+        preflight=PassingPreflight(),
+    )
+
+    result = await preprocessor.preprocess(["https://cdn.example.com/files/notice.hwp"])
+
+    assert result.extracted[0].text == "notice.hwp\n\n[HWP/HWPX text truncated]"
 
 
 @pytest.mark.anyio
