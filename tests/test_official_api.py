@@ -307,7 +307,7 @@ async def test_openai_analyzer_builds_multimodal_input_with_null_structured_text
 @pytest.mark.anyio
 async def test_openai_analyzer_filters_fallback_attachments_for_openai_support():
     analyzer = OpenAINoticeAnalyzer(
-        OpenAIAnalyzerConfig(max_images=2, max_attachments=6),
+        OpenAIAnalyzerConfig(max_images=2, max_attachments=8),
         attachment_preprocessor=FallbackOnlyAttachmentPreprocessor(),
     )
     request = OfficialProcessRequest(
@@ -321,6 +321,8 @@ async def test_openai_analyzer_filters_fallback_attachments_for_openai_support()
             "https://cdn.example.com/files/form.docx?X-Amz-Signature=pqr678",
             "https://cdn.example.com/files/sheet.xlsx?X-Amz-Signature=stu901",
             "https://cdn.example.com/files/poster.webp?X-Amz-Signature=mno345",
+            "https://cdn.example.com/files/slides.pptx?X-Amz-Signature=vwx234",
+            "https://cdn.example.com/files/readme.md?X-Amz-Signature=yz567",
         ],
     )
 
@@ -328,14 +330,44 @@ async def test_openai_analyzer_filters_fallback_attachments_for_openai_support()
 
     content = payload[0]["content"]
     assert {"type": "input_file", "file_url": request.attachment_urls[1]} in content
+    assert {"type": "input_file", "file_url": request.attachment_urls[3]} in content
+    assert {"type": "input_file", "file_url": request.attachment_urls[4]} in content
+    assert {"type": "input_file", "file_url": request.attachment_urls[6]} in content
+    assert {"type": "input_file", "file_url": request.attachment_urls[7]} in content
     assert all(item.get("filename") is None for item in content)
     assert {"type": "input_image", "image_url": request.attachment_urls[5], "detail": "auto"} in content
     assert not any("guide.hwp" in str(item) for item in content[1:])
     assert not any("archive.zip" in str(item) for item in content[1:])
-    assert not any(item.get("file_url", "").endswith(".docx?X-Amz-Signature=pqr678") for item in content)
-    assert not any(item.get("file_url", "").endswith(".xlsx?X-Amz-Signature=stu901") for item in content)
     assert "Skipped unsupported attachments" in content[0]["text"]
     assert "guide.hwp" in content[0]["text"]
     assert "archive.zip" in content[0]["text"]
-    assert "form.docx" in content[0]["text"]
-    assert "sheet.xlsx" in content[0]["text"]
+    assert "form.docx" not in content[0]["text"]
+    assert "sheet.xlsx" not in content[0]["text"]
+    assert "slides.pptx" not in content[0]["text"]
+    assert "readme.md" not in content[0]["text"]
+
+
+@pytest.mark.anyio
+async def test_openai_analyzer_uses_content_disposition_filename_for_file_support():
+    analyzer = OpenAINoticeAnalyzer(
+        OpenAIAnalyzerConfig(max_images=2, max_attachments=3),
+        attachment_preprocessor=FallbackOnlyAttachmentPreprocessor(),
+    )
+    request = OfficialProcessRequest(
+        post_id=4,
+        structured_text="첨부파일을 확인하세요.",
+        attachment_urls=[
+            "https://cdn.example.com/files/notice.pdf",
+            (
+                "https://cdn.example.com/files/download.pdf?"
+                "response-content-disposition=attachment%3B%20filename%3Dnotice.docx"
+            ),
+        ],
+    )
+
+    payload = await analyzer._build_input(request)
+
+    content = payload[0]["content"]
+    assert {"type": "input_file", "file_url": request.attachment_urls[0]} in content
+    assert {"type": "input_file", "file_url": request.attachment_urls[1]} in content
+    assert "Skipped unsupported attachments" not in content[0]["text"]

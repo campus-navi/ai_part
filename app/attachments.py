@@ -159,7 +159,9 @@ class HttpxPdfDownloader:
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                     has_pdf_extension = urlparse(str(response.url)).path.lower().endswith(".pdf")
-                    is_pdf = content_type == "application/pdf" or has_pdf_extension
+                    is_pdf = content_type == "application/pdf" or (
+                        has_pdf_extension and content_type in {"", "application/octet-stream"}
+                    )
                     if not is_pdf:
                         raise UnsupportedAttachmentError("attachment is not a PDF")
 
@@ -349,11 +351,17 @@ class PdfAttachmentPreprocessor:
             except PdfConverterError as exc:
                 fallback_urls.extend(item.url for item in downloaded)
                 warnings.append(str(exc))
-                return PdfPreprocessResult(fallback_urls=fallback_urls, warnings=warnings)
+                return PdfPreprocessResult(
+                    fallback_urls=fallback_urls,
+                    warnings=warnings,
+                )
             except asyncio.TimeoutError:
                 fallback_urls.extend(item.url for item in downloaded)
                 warnings.append("OpenDataLoader conversion timed out")
-                return PdfPreprocessResult(fallback_urls=fallback_urls, warnings=warnings)
+                return PdfPreprocessResult(
+                    fallback_urls=fallback_urls,
+                    warnings=warnings,
+                )
 
             extracted = _read_extracted_markdown(downloaded, output_dir, self.config)
             extracted_urls = {item.url for item in extracted}

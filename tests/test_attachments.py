@@ -191,6 +191,35 @@ async def test_preprocess_falls_back_for_non_pdf_attachment():
 
 
 @pytest.mark.anyio
+async def test_preprocess_tracks_mislabelled_pdf_url_as_unsupported():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document"
+                )
+            },
+            content=b"not a pdf",
+            request=request,
+        )
+
+    preprocessor = PdfAttachmentPreprocessor(
+        config=PdfPreprocessConfig(),
+        downloader=HttpxPdfDownloader(transport=httpx.MockTransport(handler)),
+        converter=WritingConverter(),
+        preflight=PassingPreflight(),
+    )
+
+    result = await preprocessor.preprocess(["https://cdn.example.com/files/notice.pdf"])
+
+    assert result.extracted == []
+    assert result.fallback_urls == ["https://cdn.example.com/files/notice.pdf"]
+    assert "attachment is not a PDF" in result.warnings[0]
+
+
+@pytest.mark.anyio
 async def test_httpx_downloader_rejects_non_pdf_content_type(tmp_path):
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

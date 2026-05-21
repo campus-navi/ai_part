@@ -25,7 +25,76 @@ TAG_CODES = (
     "STUDENT_SUPPORT",
 )
 OPENAI_IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
-OPENAI_FILE_EXTENSIONS = {".pdf"}
+# Keep this aligned with OpenAI file inputs accepted extensions.
+OPENAI_FILE_EXTENSIONS = {
+    ".asm",
+    ".bat",
+    ".c",
+    ".cc",
+    ".conf",
+    ".cpp",
+    ".csv",
+    ".css",
+    ".cxx",
+    ".def",
+    ".dic",
+    ".doc",
+    ".docx",
+    ".dot",
+    ".eml",
+    ".h",
+    ".hh",
+    ".htm",
+    ".html",
+    ".ics",
+    ".ifb",
+    ".iif",
+    ".in",
+    ".js",
+    ".json",
+    ".key",
+    ".ksh",
+    ".list",
+    ".log",
+    ".markdown",
+    ".md",
+    ".mht",
+    ".mhtml",
+    ".mime",
+    ".mjs",
+    ".nws",
+    ".odt",
+    ".pages",
+    ".pdf",
+    ".pl",
+    ".pot",
+    ".ppa",
+    ".pps",
+    ".ppt",
+    ".pptx",
+    ".pwz",
+    ".py",
+    ".rst",
+    ".rtf",
+    ".s",
+    ".sql",
+    ".srt",
+    ".text",
+    ".tsv",
+    ".txt",
+    ".vcf",
+    ".vtt",
+    ".wiz",
+    ".xla",
+    ".xlb",
+    ".xlc",
+    ".xlm",
+    ".xls",
+    ".xlsx",
+    ".xlt",
+    ".xlw",
+    ".xml",
+}
 
 ANALYSIS_INSTRUCTIONS = f"""
 You are the Campus Navi official-notice analysis engine.
@@ -273,8 +342,7 @@ def _unsupported_attachment_names(
 
 
 def _extension_from_url(url: str) -> str:
-    path = unquote(urlparse(url).path)
-    filename = path.rsplit("/", 1)[-1]
+    filename = _attachment_filename_from_url(url)
     if "." not in filename:
         return ""
     return f".{filename.rsplit('.', 1)[-1].lower()}"
