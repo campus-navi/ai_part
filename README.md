@@ -33,6 +33,7 @@ opendataloader-pdf-hybrid --port 5002 --force-ocr --ocr-lang "ko,en"
 
 - `POST /ai/official/process`: 공지 1건 분석
 - `POST /ai/official/process/batch`: 공지 여러 건을 항목별 성공/실패로 분석
+- `POST /ai/academic-plan/review`: 학업계획서 섹션별 첨삭, diff, 수정 이유 생성
 
 분석기는 OpenAI Responses API로 `structured_text`, `image_urls`,
 `attachment_urls`를 함께 전달해 멀티모달로 분석합니다. 응답은 Pydantic 스키마로
@@ -53,6 +54,11 @@ PDF와 OpenAI file inputs가 지원하는 문서/스프레드시트/프레젠테
 
 - `OPENAI_API_KEY`: 필수
 - `OPENAI_MODEL`: 선택, 기본값 `gpt-4.1-mini`
+- `ACADEMIC_PLAN_MODEL`: 선택, 학업계획서 첨삭 Agent 모델, 기본값 `gpt-4.1-mini`
+- `ACADEMIC_PLAN_MAX_TOKENS`: 선택, 학업계획서 첨삭 Agent 최대 출력 토큰, 기본값 `3000`
+- `ACADEMIC_PLAN_MCP_COMMAND`: 선택, RAG MCP stdio 서버 실행 명령, 기본값 현재 Python
+- `ACADEMIC_PLAN_MCP_ARGS`: 선택, MCP stdio 서버 인자, 기본값 `-m app.academic_plan_mcp`
+- `ACADEMIC_PLAN_MCP_NAME`: 선택, MCP 서버 이름, 기본값 `academic-plan-rag`
 - `AI_MAX_IMAGES`: 선택, 기본값 `8`
 - `AI_MAX_ATTACHMENTS`: 선택, 기본값 `8`
 - `AI_IMAGE_DETAIL`: 선택, 기본값 `auto`

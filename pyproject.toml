@@ -7,6 +7,7 @@ dependencies = [
     "fastapi",
     "httpx",
     "openai",
+    "openai-agents",
     "opendataloader-pdf[hybrid]",
     "python-dotenv",
     "rhwp-python",

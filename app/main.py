@@ -12,6 +12,14 @@ from app.analyzer import (
     NoticeAnalyzer,
     OpenAINoticeAnalyzer,
 )
+from app.academic_plan import (
+    AcademicPlanConfigurationError,
+    AcademicPlanExecutionError,
+    AcademicPlanReviewer,
+    AcademicPlanReviewRequest,
+    AcademicPlanReviewResponse,
+    OpenAIAcademicPlanReviewer,
+)
 from app.models import (
     BatchProcessItemResult,
     BatchProcessRequest,
@@ -25,6 +33,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 notice_analyzer = OpenAINoticeAnalyzer()
+academic_plan_reviewer = OpenAIAcademicPlanReviewer()
 
 
 @asynccontextmanager
@@ -41,6 +50,10 @@ def get_notice_analyzer() -> NoticeAnalyzer:
     return notice_analyzer
 
 
+def get_academic_plan_reviewer() -> AcademicPlanReviewer:
+    return academic_plan_reviewer
+
+
 @app.post("/ai/official/process", response_model=OfficialProcessResponse)
 async def process_official_notice(
     request: OfficialProcessRequest,
@@ -54,6 +67,22 @@ async def process_official_notice(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except AnalyzerExecutionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/ai/academic-plan/review", response_model=AcademicPlanReviewResponse)
+async def review_academic_plan(
+    request: AcademicPlanReviewRequest,
+    reviewer: Annotated[AcademicPlanReviewer, Depends(get_academic_plan_reviewer)],
+) -> AcademicPlanReviewResponse:
+    try:
+        return await reviewer.review(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except AcademicPlanConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AcademicPlanExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
 
 @app.get("/health")
 async def health_check():
