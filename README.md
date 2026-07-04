@@ -42,6 +42,8 @@ AI Agent는 수정문과 수정 이유만 생성하고, `original_content`, `dif
 700자 이상 원문은 수정문을 최소 650자, 원문 대비 80% 이상으로 유지하도록 검증하며,
 Agent는 `count_korean_characters` tool로 글자 수를 확인할 수 있습니다.
 섹션 누락을 막기 위해 Agent 실행은 섹션별로 한 번씩 수행하고 서버가 최종 응답을 합칩니다.
+Agent는 학업계획서 첨삭 초안인 `draft_content`를 만든 뒤 `humanize_korean` skill로 문체를 다듬고,
+테스트 JSON에는 `revision_stages`로 각 skill 적용 전후 수정본을 남깁니다.
 
 분석기는 OpenAI Responses API로 `structured_text`, `image_urls`,
 `attachment_urls`를 함께 전달해 멀티모달로 분석합니다. 응답은 Pydantic 스키마로

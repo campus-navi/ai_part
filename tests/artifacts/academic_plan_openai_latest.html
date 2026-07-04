@@ -34,6 +34,9 @@
   .inline-diff { padding:12px; background:#f8fafc; border:1px solid var(--line); border-radius:6px; }
   del { color:var(--red); background:#fee4e2; text-decoration:line-through; padding:1px 3px; border-radius:4px; }
   ins { color:var(--green); background:#dcfae6; text-decoration:none; padding:1px 3px; border-radius:4px; }
+  .block-diff { display:block; padding:10px; border-radius:6px; }
+  .has-tooltip { position:relative; cursor:help; }
+  .has-tooltip:hover::after { content:attr(data-tooltip); position:absolute; z-index:20; left:0; bottom:calc(100% + 8px); width:min(420px, 80vw); white-space:pre-wrap; color:#101828; background:#fff; border:1px solid var(--line); border-radius:8px; box-shadow:0 12px 28px rgb(16 24 40 / 16%); padding:10px 12px; font-size:12px; line-height:1.5; text-decoration:none; }
   .arrow { margin:0 6px; color:var(--muted); }
   dl { display:grid; grid-template-columns:48px 1fr; gap:4px 8px; margin:10px 0; }
   dt { color:var(--muted); font-weight:700; }
@@ -80,6 +83,10 @@ function esc(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function attr(value) {
+  return esc(value).replaceAll("\n", "&#10;");
 }
 
 function block(value) {
@@ -161,8 +168,13 @@ function renderSection(section, index) {
       </div>
 
       <details open>
+        <summary>스킬 적용 단계</summary>
+        ${(section.revision_stages ?? []).map(renderStage).join("") || "<p class='muted'>단계 기록 없음</p>"}
+      </details>
+
+      <details open>
         <summary>변경 사항</summary>
-        ${(section.changes ?? []).map(renderChange).join("") || "<p class='muted'>변경 사항 없음</p>"}
+        ${(section.changes ?? []).map((change) => renderChange(change, section.reasons ?? [])).join("") || "<p class='muted'>변경 사항 없음</p>"}
       </details>
 
       <details open>
@@ -183,30 +195,77 @@ function renderSection(section, index) {
   `;
 }
 
-function renderChange(change) {
+function renderChange(change, reasons) {
+  const tooltip = reasonTooltip(change, reasons);
   return `
     <article class="change">
       <div><span class="badge change-type">${esc(change.type)}</span></div>
       <div class="change-grid">
-        <div><h4>원문</h4><p>${block(change.original_text)}</p></div>
-        <div><h4>수정</h4><p>${block(change.revised_text)}</p></div>
+        <div><h4>원문</h4><p>${renderBlockDiff("delete", change.original_text, tooltip)}</p></div>
+        <div><h4>수정</h4><p>${renderBlockDiff("insert", change.revised_text, tooltip)}</p></div>
       </div>
-      <h4>부분 변경</h4>
-      <p class="inline-diff">${renderInlineDiff(change.inline_diff ?? [])}</p>
+      ${(change.inline_diff ?? []).length
+        ? `<h4>부분 변경</h4><p class="inline-diff">${renderInlineDiff(change.inline_diff, tooltip)}</p>`
+        : `<p class="muted">문단 재구성 변경이라 부분 강조를 생략했습니다.</p>`}
     </article>
   `;
 }
 
-function renderInlineDiff(parts) {
+function renderBlockDiff(type, text, tooltip) {
+  if (!text) return "";
+  const tag = type === "delete" ? "del" : "ins";
+  return `<${tag} class="block-diff has-tooltip" data-tooltip="${attr(tooltip)}">${block(text)}</${tag}>`;
+}
+
+function renderStage(stage) {
+  return `
+    <article class="change">
+      <div><span class="badge">${esc(stage.skill_name)}</span></div>
+      <div class="change-grid">
+        <div><h4>적용 전</h4><p>${block(stage.before_content)}</p></div>
+        <div><h4>적용 후</h4><p>${block(stage.after_content)}</p></div>
+      </div>
+    </article>
+  `;
+}
+
+function renderInlineDiff(parts, tooltip) {
   return parts.map((part) => {
     if (part.type === "equal") return `<span class="same">${block(part.text)}</span>`;
-    if (part.type === "delete") return `<del>${block(part.original_text)}</del>`;
-    if (part.type === "insert") return `<ins>${block(part.revised_text)}</ins>`;
+    if (part.type === "delete") return `<del class="has-tooltip" data-tooltip="${attr(tooltip)}">${block(part.original_text)}</del>`;
+    if (part.type === "insert") return `<ins class="has-tooltip" data-tooltip="${attr(tooltip)}">${block(part.revised_text)}</ins>`;
     if (part.type === "replace") {
-      return `<span class="swap"><del>${block(part.original_text)}</del><span class="arrow">→</span><ins>${block(part.revised_text)}</ins></span>`;
+      return `<span class="swap has-tooltip" data-tooltip="${attr(tooltip)}"><del>${block(part.original_text)}</del><span class="arrow">→</span><ins>${block(part.revised_text)}</ins></span>`;
     }
     return "";
   }).join("");
+}
+
+function reasonTooltip(change, reasons) {
+  const related = relatedReasons(change, reasons);
+  return related.map((reason) => {
+    const label = reason.category ? `[${reason.category}] ` : "";
+    return `${label}${reason.reason ?? reason.explanation ?? ""}`;
+  }).filter(Boolean).slice(0, 6).join("\n");
+}
+
+function relatedReasons(change, reasons) {
+  const original = String(change.original_text ?? "");
+  const revised = String(change.revised_text ?? "");
+  const matched = reasons.filter((reason) => {
+    const reasonOriginal = String(reason.original_text ?? "");
+    const reasonRevised = String(reason.revised_text ?? "");
+    return overlaps(original, reasonOriginal) || overlaps(revised, reasonRevised);
+  });
+  return matched.length ? matched : reasons;
+}
+
+function overlaps(text, snippet) {
+  if (!text || !snippet) return false;
+  if (text.includes(snippet) || snippet.includes(text)) return true;
+  const compactText = text.replace(/\s+/g, "");
+  const compactSnippet = snippet.replace(/\s+/g, "");
+  return compactSnippet.length >= 12 && compactText.includes(compactSnippet.slice(0, 24));
 }
 
 function renderReason(reason) {
@@ -214,7 +273,7 @@ function renderReason(reason) {
   return `
     <article class="reason">
       <div><span class="badge">${esc(reason.category)}</span></div>
-      <p>${block(reason.explanation)}</p>
+      <p>${block(reason.reason ?? reason.explanation)}</p>
       <dl>
         <dt>원문</dt><dd>${block(reason.original_text)}</dd>
         <dt>수정</dt><dd>${block(reason.revised_text)}</dd>

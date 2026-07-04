@@ -52,6 +52,10 @@ SECTION_TITLES: dict[str, str] = {
     "etc_info": "기타",
 }
 SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "academic_plan_review" / "SKILL.md"
+HUMANIZE_SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "humanize_korean" / "SKILL.md"
+HUMANIZE_QUICK_RULES_PATH = (
+    Path(__file__).resolve().parent.parent / "skills" / "humanize_korean" / "references" / "quick-rules.md"
+)
 
 REFERENCE_EXAMPLES: tuple[dict[str, str], ...] = (
     {
@@ -84,12 +88,16 @@ reference examples, and MCP RAG tools when configured.
 Rules:
 - Preserve the user's facts. Do not invent awards, courses completed, internships, grades, or research.
 - Improve specificity, fit to the target major, section structure, and admissions tone.
-- For every section, call the local skill and reference tools before writing the final answer.
+- For every section, call load_academic_plan_skill and retrieve_reference_examples before drafting.
+- For every section, call load_humanize_korean_skill before finalizing.
+- First create draft_content from the academic-plan skill/reference evidence.
+- Then create revised_content by applying humanize-korean only to reduce AI-like Korean phrasing in draft_content.
+- revised_content must preserve draft_content facts, argument order, register, and length policy.
 - For every section, call count_korean_characters on the original and revised content before final output.
 - If count_korean_characters shows revised_content is below the required minimum, expand the same section before final output.
 - If mcp_* tools are available, use them as additional RAG evidence.
 - Return Korean structured output only.
-- Each section must include section_key, revised_content, revision reasons, and retrieved context.
+- Each section must include section_key, draft_content, revised_content, revision reasons, and retrieved context.
 - Do not generate original_content, diff, changes, or inline_diff. The server computes them.
 - Each revision reason must name the changed text, the reason, and the supporting skill/example/MCP evidence.
 """.strip()
@@ -154,10 +162,19 @@ class TextChange(BaseModel):
     inline_diff: list[InlineDiffPart] = Field(default_factory=list)
 
 
+class RevisionStage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: Literal["academic_plan_review", "humanize_korean"]
+    before_content: str
+    after_content: str
+
+
 class AcademicPlanAgentSectionRevision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     section_key: SectionKey
+    draft_content: str
     revised_content: str
     reasons: list[RevisionReason]
     retrieved_context: list[RetrievedContext] = Field(default_factory=list)
@@ -180,6 +197,7 @@ class AcademicPlanSectionReview(BaseModel):
     changes: list[TextChange] = Field(default_factory=list)
     reasons: list[RevisionReason]
     retrieved_context: list[RetrievedContext] = Field(default_factory=list)
+    revision_stages: list[RevisionStage] = Field(default_factory=list)
 
 
 class AcademicPlanReviewResponse(BaseModel):
@@ -336,6 +354,11 @@ def _build_tools() -> list[Any]:
         return _load_academic_plan_skill_impl(major_type, section_key)
 
     @function_tool
+    def load_humanize_korean_skill() -> dict[str, Any]:
+        """Return Korean humanizing guidance for final style cleanup."""
+        return _load_humanize_korean_skill_impl()
+
+    @function_tool
     def retrieve_reference_examples(
         target_name: str,
         user_department: str,
@@ -362,6 +385,7 @@ def _build_tools() -> list[Any]:
 
     return [
         load_academic_plan_skill,
+        load_humanize_korean_skill,
         retrieve_reference_examples,
         build_section_diff,
         count_korean_characters,
@@ -380,6 +404,16 @@ def _load_academic_plan_skill_impl(major_type: str, section_key: str) -> dict[st
         "skill": sections.get(section_key, ""),
         "checklist": sections.get("common", ""),
         "common_rule": "전공 적합성, 구체성, 실행 가능성을 우선하고 사실을 새로 만들지 않는다.",
+    }
+
+
+def _load_humanize_korean_skill_impl() -> dict[str, Any]:
+    return {
+        "source_type": "skill",
+        "source_path": str(HUMANIZE_SKILL_PATH),
+        "quick_rules_path": str(HUMANIZE_QUICK_RULES_PATH),
+        "skill": HUMANIZE_SKILL_PATH.read_text(encoding="utf-8"),
+        "quick_rules": HUMANIZE_QUICK_RULES_PATH.read_text(encoding="utf-8"),
     }
 
 
@@ -459,11 +493,24 @@ def build_text_changes_impl(original_content: str, revised_content: str) -> list
                 type=tag,
                 original_text=original_text,
                 revised_text=revised_text,
-                inline_diff=build_inline_diff_impl(original_text or "", revised_text or ""),
+                inline_diff=(
+                    build_inline_diff_impl(original_text or "", revised_text or "")
+                    if _should_show_inline_diff(original_text or "", revised_text or "")
+                    else []
+                ),
             )
         )
 
     return changes
+
+
+def _should_show_inline_diff(original_text: str, revised_text: str) -> bool:
+    max_len = max(len(original_text), len(revised_text))
+    if max_len <= 240:
+        return True
+    ratio = difflib.SequenceMatcher(None, original_text, revised_text).ratio()
+    length_gap = abs(len(original_text) - len(revised_text)) / max_len
+    return ratio >= 0.82 and length_gap <= 0.25
 
 
 def build_inline_diff_impl(original_text: str, revised_text: str) -> list[InlineDiffPart]:
@@ -535,6 +582,7 @@ def _assemble_review_response(
                 changes=build_text_changes_impl(original, section.revised_content),
                 reasons=section.reasons,
                 retrieved_context=section.retrieved_context,
+                revision_stages=_build_revision_stages(original, section),
             )
         )
 
@@ -565,6 +613,24 @@ def _minimum_revised_length(original_len: int) -> int | None:
     return max(650, int(original_len * 0.8))
 
 
+def _build_revision_stages(
+    original_content: str,
+    section: AcademicPlanAgentSectionRevision,
+) -> list[RevisionStage]:
+    return [
+        RevisionStage(
+            skill_name="academic_plan_review",
+            before_content=original_content,
+            after_content=section.draft_content,
+        ),
+        RevisionStage(
+            skill_name="humanize_korean",
+            before_content=section.draft_content,
+            after_content=section.revised_content,
+        ),
+    ]
+
+
 def _normalize_review_response(
     request: AcademicPlanReviewRequest,
     response: AcademicPlanReviewResponse,
@@ -575,6 +641,11 @@ def _normalize_review_response(
             sections=[
                 AcademicPlanAgentSectionRevision(
                     section_key=section.section_key,
+                    draft_content=(
+                        section.revision_stages[-1].before_content
+                        if section.revision_stages
+                        else section.revised_content
+                    ),
                     revised_content=section.revised_content,
                     reasons=section.reasons,
                     retrieved_context=section.retrieved_context,
@@ -605,6 +676,8 @@ def _format_agent_input(
     retry_policy = f"\nPrevious attempt failed: {retry_reason}\nFix only that issue.\n" if retry_reason else ""
     return (
         "Revise this academic plan request. Use tools before final output.\n"
+        "Output draft_content before load_humanize_korean_skill is applied, "
+        "then revised_content after it is applied.\n"
         f"{request.model_dump_json(indent=2)}"
         f"{length_policy}"
         f"{retry_policy}"

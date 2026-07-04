@@ -5,6 +5,7 @@ from mcp.server.fastmcp import FastMCP
 from app.academic_plan import (
     count_korean_characters_impl,
     _load_academic_plan_skill_impl,
+    _load_humanize_korean_skill_impl,
     _retrieve_reference_examples_impl,
 )
 
@@ -16,6 +17,12 @@ mcp = FastMCP("academic-plan-rag")
 def mcp_load_academic_plan_skill(major_type: str, section_key: str) -> dict:
     """Return academic-plan revision skill guidance."""
     return _load_academic_plan_skill_impl(major_type, section_key)
+
+
+@mcp.tool()
+def mcp_load_humanize_korean_skill() -> dict:
+    """Return Korean humanizing guidance for final style cleanup."""
+    return _load_humanize_korean_skill_impl()
 
 
 @mcp.tool()

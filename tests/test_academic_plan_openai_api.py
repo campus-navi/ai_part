@@ -123,3 +123,9 @@ async def test_academic_plan_review_calls_openai_api():
         assert f"--- {original.section_key}.original" in reviewed.diff
         assert reviewed.changes
         assert reviewed.reasons
+        assert [stage.skill_name for stage in reviewed.revision_stages] == [
+            "academic_plan_review",
+            "humanize_korean",
+        ]
+        assert reviewed.revision_stages[0].before_content == original.content
+        assert reviewed.revision_stages[-1].after_content == reviewed.revised_content
