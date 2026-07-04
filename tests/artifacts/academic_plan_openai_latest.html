@@ -34,6 +34,8 @@
   .inline-diff { padding:12px; background:#f8fafc; border:1px solid var(--line); border-radius:6px; }
   del { color:var(--red); background:#fee4e2; text-decoration:line-through; padding:1px 3px; border-radius:4px; }
   ins { color:var(--green); background:#dcfae6; text-decoration:none; padding:1px 3px; border-radius:4px; }
+  .highlighted-text { padding:10px; background:#fcfcfd; border:1px solid var(--line); border-radius:6px; }
+  .highlight-fragment { padding:2px 4px; border-radius:4px; }
   .block-diff { display:block; padding:10px; border-radius:6px; }
   .has-tooltip { position:relative; cursor:help; }
   .has-tooltip:hover::after { content:attr(data-tooltip); position:absolute; z-index:20; left:0; bottom:calc(100% + 8px); width:min(420px, 80vw); white-space:pre-wrap; color:#101828; background:#fff; border:1px solid var(--line); border-radius:8px; box-shadow:0 12px 28px rgb(16 24 40 / 16%); padding:10px 12px; font-size:12px; line-height:1.5; text-decoration:none; }
@@ -159,11 +161,11 @@ function renderSection(section, index) {
       <div class="two-col">
         <article>
           <h3>원문 <span class="muted">${count(section.original_content)}자</span></h3>
-          <p>${block(section.original_content)}</p>
+          <p class="highlighted-text">${renderHighlightedContent(section.original_content, section.changes ?? [], "original", section.reasons ?? [])}</p>
         </article>
         <article>
           <h3>수정문 <span class="muted">${count(section.revised_content)}자</span></h3>
-          <p>${block(section.revised_content)}</p>
+          <p class="highlighted-text">${renderHighlightedContent(section.revised_content, section.changes ?? [], "revised", section.reasons ?? [])}</p>
         </article>
       </div>
 
@@ -215,6 +217,64 @@ function renderBlockDiff(type, text, tooltip) {
   if (!text) return "";
   const tag = type === "delete" ? "del" : "ins";
   return `<${tag} class="block-diff has-tooltip" data-tooltip="${attr(tooltip)}">${block(text)}</${tag}>`;
+}
+
+function renderHighlightedContent(text, changes, side, reasons) {
+  const source = String(text ?? "");
+  const ranges = changes
+    .map((change) => {
+      const snippet = side === "original" ? change.original_text : change.revised_text;
+      if (!snippet) return null;
+      const match = findTextRange(source, String(snippet));
+      if (!match) return null;
+      return {
+        start: match.start,
+        end: match.end,
+        tag: side === "original" ? "del" : "ins",
+        tooltip: reasonTooltip(change, reasons),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start);
+
+  if (!ranges.length) return block(source);
+
+  let cursor = 0;
+  let html = "";
+  for (const range of ranges) {
+    if (range.start < cursor) continue;
+    html += block(source.slice(cursor, range.start));
+    html += `<${range.tag} class="highlight-fragment has-tooltip" data-tooltip="${attr(range.tooltip)}">${block(source.slice(range.start, range.end))}</${range.tag}>`;
+    cursor = range.end;
+  }
+  html += block(source.slice(cursor));
+  return html;
+}
+
+function findTextRange(source, snippet) {
+  const exactStart = source.indexOf(snippet);
+  if (exactStart >= 0) return { start: exactStart, end: exactStart + snippet.length };
+
+  const sourceMap = compactWithMap(source);
+  const compactSnippet = snippet.replace(/\s+/g, "");
+  const compactStart = sourceMap.text.indexOf(compactSnippet);
+  if (compactStart < 0) return null;
+  const compactEnd = compactStart + compactSnippet.length - 1;
+  return {
+    start: sourceMap.map[compactStart],
+    end: sourceMap.map[compactEnd] + 1,
+  };
+}
+
+function compactWithMap(text) {
+  let compact = "";
+  const map = [];
+  [...String(text)].forEach((char, index) => {
+    if (/\s/.test(char)) return;
+    map.push(index);
+    compact += char;
+  });
+  return { text: compact, map };
 }
 
 function renderStage(stage) {
