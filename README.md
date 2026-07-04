@@ -39,6 +39,9 @@ opendataloader-pdf-hybrid --port 5002 --force-ocr --ocr-lang "ko,en"
 섹션별 모범 사례가 쌓이면 MCP RAG 서버나 `retrieve_reference_examples` 쪽만 확장하면 됩니다.
 AI Agent는 수정문과 수정 이유만 생성하고, `original_content`, `diff`, `changes`,
 `inline_diff`는 서버가 계산해 최종 응답 JSON을 조립합니다.
+700자 이상 원문은 수정문을 최소 650자, 원문 대비 80% 이상으로 유지하도록 검증하며,
+Agent는 `count_korean_characters` tool로 글자 수를 확인할 수 있습니다.
+섹션 누락을 막기 위해 Agent 실행은 섹션별로 한 번씩 수행하고 서버가 최종 응답을 합칩니다.
 
 분석기는 OpenAI Responses API로 `structured_text`, `image_urls`,
 `attachment_urls`를 함께 전달해 멀티모달로 분석합니다. 응답은 Pydantic 스키마로
@@ -96,3 +99,7 @@ OpenAI API를 실제 호출하는 학업계획서 첨삭 smoke test:
 ```bash
 RUN_OPENAI_API_TESTS=1 .venv/bin/python -m pytest -s tests/test_academic_plan_openai_api.py
 ```
+
+이 테스트는 `application_motive`, `interest_field`, `study_plan`, `etc_info` 네 섹션을
+모두 포함하며 각 섹션은 700자 이상 1,000자 이하입니다. 필요하면
+`OPENAI_API_TEST_MAX_TOKENS`로 출력 토큰 한도를 조절합니다.

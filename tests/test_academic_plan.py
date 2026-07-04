@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.academic_plan import (
@@ -9,11 +10,14 @@ from app.academic_plan import (
     AcademicPlanSectionReview,
     RevisionReason,
     _assemble_review_response,
+    _format_agent_input,
     _load_academic_plan_skill_impl,
     _normalize_review_response,
     _retrieve_reference_examples_impl,
+    _run_section_agent,
     build_inline_diff_impl,
     build_section_diff_impl,
+    count_korean_characters_impl,
 )
 from app.main import app, get_academic_plan_reviewer
 
@@ -90,6 +94,15 @@ def test_academic_plan_tools_return_skill_and_examples():
     assert "가독성" in skill["checklist"]
     assert examples[0]["source_type"] == "example"
     assert "과목" in examples[0]["content"]
+
+
+def test_count_korean_characters_counts_total_and_non_whitespace():
+    counts = count_korean_characters_impl("경제학을 체계적으로\n공부하겠습니다.")
+
+    assert counts == {
+        "characters": 19,
+        "characters_without_whitespace": 17,
+    }
 
 
 def test_normalize_review_response_fills_original_content_and_diff():
@@ -175,6 +188,116 @@ def test_assemble_review_response_uses_smaller_agent_output():
     assert section.diff
     assert section.changes[0].inline_diff
     assert any(part.type == "replace" for part in section.changes[0].inline_diff)
+
+
+def test_assemble_review_response_rejects_overly_short_long_section_revision():
+    original = "경제학과 컴퓨터공학을 연결해 학습하겠습니다. " * 30
+    request = AcademicPlanReviewRequest(
+        document_type="ACADEMIC_PLAN",
+        metadata=AcademicPlanMetadata(
+            major_type="DOUBLE_MAJOR",
+            target_name="경제학과",
+            user_department="컴퓨터공학과",
+        ),
+        sections=[
+            {
+                "section_key": "application_motive",
+                "content": original,
+            }
+        ],
+    )
+    output = AcademicPlanAgentOutput(
+        sections=[
+            AcademicPlanAgentSectionRevision(
+                section_key="application_motive",
+                revised_content="경제학을 공부하겠습니다.",
+                reasons=[RevisionReason(category="clarity", reason="짧게 정리했습니다.")],
+            )
+        ],
+        overall_comment="짧습니다.",
+    )
+
+    with pytest.raises(Exception, match="too short|below 80%"):
+        _assemble_review_response(request, output)
+
+
+@pytest.mark.anyio
+async def test_run_section_agent_retries_when_revision_is_too_short():
+    original = "경제학과 컴퓨터공학을 연결해 학습하겠습니다. " * 30
+    request = AcademicPlanReviewRequest(
+        document_type="ACADEMIC_PLAN",
+        metadata=AcademicPlanMetadata(
+            major_type="DOUBLE_MAJOR",
+            target_name="경제학과",
+            user_department="컴퓨터공학과",
+        ),
+        sections=[
+            {
+                "section_key": "application_motive",
+                "content": original,
+            }
+        ],
+    )
+
+    class FakeRunner:
+        calls = 0
+
+        @classmethod
+        async def run(cls, agent, prompt):
+            cls.calls += 1
+            revised = (
+                "경제학을 공부하겠습니다."
+                if cls.calls == 1
+                else "경제학과 컴퓨터공학을 연결해 학습하겠습니다. " * 26
+            )
+            return type(
+                "Result",
+                (),
+                {
+                    "final_output": AcademicPlanAgentOutput(
+                        sections=[
+                            AcademicPlanAgentSectionRevision(
+                                section_key="application_motive",
+                                revised_content=revised,
+                                reasons=[
+                                    RevisionReason(
+                                        category="clarity",
+                                        reason="분량 기준에 맞춰 보완했습니다.",
+                                    )
+                                ],
+                            )
+                        ],
+                        overall_comment="보완했습니다.",
+                    )
+                },
+            )()
+
+    section = await _run_section_agent(FakeRunner, object(), request)
+
+    assert FakeRunner.calls == 2
+    assert len(section.revised_content) >= int(len(original) * 0.8)
+
+
+def test_format_agent_input_includes_length_policy_and_retry_reason():
+    request = AcademicPlanReviewRequest(
+        document_type="ACADEMIC_PLAN",
+        metadata=AcademicPlanMetadata(
+            major_type="DOUBLE_MAJOR",
+            target_name="경제학과",
+            user_department="컴퓨터공학과",
+        ),
+        sections=[
+            {
+                "section_key": "application_motive",
+                "content": "경제학과 컴퓨터공학을 연결해 학습하겠습니다. " * 30,
+            }
+        ],
+    )
+
+    prompt = _format_agent_input(request, "too short")
+
+    assert "revised_content must be at least" in prompt
+    assert "Previous attempt failed: too short" in prompt
 
 
 def test_inline_diff_marks_only_changed_phrase():

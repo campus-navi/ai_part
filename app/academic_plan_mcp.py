@@ -3,6 +3,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from app.academic_plan import (
+    count_korean_characters_impl,
     _load_academic_plan_skill_impl,
     _retrieve_reference_examples_impl,
 )
@@ -31,6 +32,12 @@ def mcp_retrieve_reference_examples(
         section_key=section_key,
         limit=limit,
     )
+
+
+@mcp.tool()
+def mcp_count_korean_characters(text: str) -> dict:
+    """Count Korean application characters, excluding whitespace."""
+    return count_korean_characters_impl(text)
 
 
 if __name__ == "__main__":

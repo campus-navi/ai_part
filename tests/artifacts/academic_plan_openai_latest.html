@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Academic Plan Review Result</title>
+<style>
+  :root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --text:#18202b; --muted:#667085; --line:#d9dee8; --blue:#1d4ed8; --green:#087443; --red:#b42318; --amber:#92400e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:var(--bg); color:var(--text); line-height:1.6; }
+  main { max-width:1180px; margin:0 auto; padding:32px 20px 64px; }
+  h1 { margin:0 0 8px; font-size:30px; letter-spacing:0; }
+  h2 { margin:0; font-size:22px; }
+  h3 { margin:0 0 10px; font-size:15px; color:#344054; }
+  h4 { margin:10px 0 6px; font-size:13px; color:#475467; }
+  p { margin:0; white-space:normal; word-break:keep-all; overflow-wrap:anywhere; }
+  button { border:1px solid var(--line); background:var(--panel); border-radius:6px; padding:8px 10px; cursor:pointer; }
+  .hero { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:24px; margin-bottom:18px; }
+  .top { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+  .actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:18px; }
+  .meta div, article, .change, .reason, .context { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .meta strong { display:block; font-size:12px; color:var(--muted); }
+  .muted { color:var(--muted); }
+  .section { margin-top:18px; }
+  .section > header { display:flex; gap:12px; align-items:center; margin-bottom:12px; }
+  .section-index { width:34px; height:34px; border-radius:50%; background:#111827; color:white; display:grid; place-items:center; font-weight:700; flex:0 0 auto; }
+  .two-col, .change-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  details { background:transparent; margin-top:12px; }
+  summary { cursor:pointer; font-weight:700; padding:10px 0; }
+  .badge { display:inline-block; font-size:12px; font-weight:700; color:var(--blue); background:#e8f0ff; border:1px solid #bdd1ff; border-radius:999px; padding:2px 8px; }
+  .change-type { color:var(--amber); background:#fff7ed; border-color:#fed7aa; }
+  .change, .reason, .context { margin:8px 0; }
+  .inline-diff { padding:12px; background:#f8fafc; border:1px solid var(--line); border-radius:6px; }
+  del { color:var(--red); background:#fee4e2; text-decoration:line-through; padding:1px 3px; border-radius:4px; }
+  ins { color:var(--green); background:#dcfae6; text-decoration:none; padding:1px 3px; border-radius:4px; }
+  .arrow { margin:0 6px; color:var(--muted); }
+  dl { display:grid; grid-template-columns:48px 1fr; gap:4px 8px; margin:10px 0; }
+  dt { color:var(--muted); font-weight:700; }
+  dd { margin:0; }
+  ul { margin:8px 0 0; padding-left:20px; }
+  pre { overflow:auto; white-space:pre-wrap; background:#101828; color:#e4e7ec; border-radius:8px; padding:14px; }
+  .error { border-color:#fecdca; background:#fffbfa; color:#912018; }
+  @media (max-width: 760px) { .top, .meta, .two-col, .change-grid { display:block; } .actions { margin-top:12px; } main { padding:20px 12px 44px; } }
+</style>
+</head>
+<body>
+<main id="app">
+  <section class="hero">
+    <div class="top">
+      <div>
+        <h1>학업계획서 첨삭 결과</h1>
+        <p class="muted">academic_plan_openai_latest.json 로딩 중...</p>
+      </div>
+      <div class="actions">
+        <span class="muted" id="status">대기 중</span>
+        <button type="button" id="reload">새로고침</button>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const JSON_FILE = "academic_plan_openai_latest.json";
+const POLL_MS = 3000;
+const sectionLabels = {
+  application_motive: "지원동기",
+  interest_field: "관심분야",
+  study_plan: "학업계획",
+  etc_info: "기타"
+};
+let latestText = "";
+
+const app = document.getElementById("app");
+document.getElementById("reload").addEventListener("click", () => loadJson(true));
+
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function block(value) {
+  return esc(value).replaceAll("\n", "<br>");
+}
+
+function setStatus(message) {
+  const status = document.getElementById("status");
+  if (status) status.textContent = message;
+}
+
+async function loadJson(force = false) {
+  try {
+    const response = await fetch(`${JSON_FILE}?t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const text = await response.text();
+    if (!force && text === latestText) {
+      setStatus(`최신 상태 · ${new Date().toLocaleTimeString()}`);
+      return;
+    }
+    latestText = text;
+    render(JSON.parse(text));
+    setStatus(`반영 완료 · ${new Date().toLocaleTimeString()}`);
+  } catch (error) {
+    renderError(error);
+  }
+}
+
+function render(data) {
+  const metadata = data.metadata ?? {};
+  app.innerHTML = `
+    <section class="hero">
+      <div class="top">
+        <div>
+          <h1>학업계획서 첨삭 결과</h1>
+          <p class="muted">${esc(data.document_type)}</p>
+        </div>
+        <div class="actions">
+          <span class="muted" id="status">반영 완료 · ${new Date().toLocaleTimeString()}</span>
+          <button type="button" id="reload">새로고침</button>
+        </div>
+      </div>
+      <div class="meta">
+        <div><strong>전공 유형</strong>${esc(metadata.major_type)}</div>
+        <div><strong>지원 학과</strong>${esc(metadata.target_name)}</div>
+        <div><strong>소속 학과</strong>${esc(metadata.user_department)}</div>
+      </div>
+    </section>
+    <section class="hero">
+      <h3>총평</h3>
+      <p>${block(data.overall_comment)}</p>
+    </section>
+    ${(data.sections ?? []).map(renderSection).join("")}
+  `;
+  document.getElementById("reload").addEventListener("click", () => loadJson(true));
+}
+
+function renderSection(section, index) {
+  const label = sectionLabels[section.section_key] ?? section.section_key;
+  return `
+    <section class="section">
+      <header>
+        <span class="section-index">${index + 1}</span>
+        <div>
+          <h2>${esc(label)}</h2>
+          <p class="muted">${esc(section.section_key)}</p>
+        </div>
+      </header>
+
+      <div class="two-col">
+        <article>
+          <h3>원문 <span class="muted">${count(section.original_content)}자</span></h3>
+          <p>${block(section.original_content)}</p>
+        </article>
+        <article>
+          <h3>수정문 <span class="muted">${count(section.revised_content)}자</span></h3>
+          <p>${block(section.revised_content)}</p>
+        </article>
+      </div>
+
+      <details open>
+        <summary>변경 사항</summary>
+        ${(section.changes ?? []).map(renderChange).join("") || "<p class='muted'>변경 사항 없음</p>"}
+      </details>
+
+      <details open>
+        <summary>수정 이유</summary>
+        ${(section.reasons ?? []).map(renderReason).join("") || "<p class='muted'>수정 이유 없음</p>"}
+      </details>
+
+      <details>
+        <summary>Diff 원문</summary>
+        <pre>${esc(section.diff)}</pre>
+      </details>
+
+      <details>
+        <summary>참고 컨텍스트</summary>
+        ${(section.retrieved_context ?? []).map(renderContext).join("") || "<p class='muted'>참고 컨텍스트 없음</p>"}
+      </details>
+    </section>
+  `;
+}
+
+function renderChange(change) {
+  return `
+    <article class="change">
+      <div><span class="badge change-type">${esc(change.type)}</span></div>
+      <div class="change-grid">
+        <div><h4>원문</h4><p>${block(change.original_text)}</p></div>
+        <div><h4>수정</h4><p>${block(change.revised_text)}</p></div>
+      </div>
+      <h4>부분 변경</h4>
+      <p class="inline-diff">${renderInlineDiff(change.inline_diff ?? [])}</p>
+    </article>
+  `;
+}
+
+function renderInlineDiff(parts) {
+  return parts.map((part) => {
+    if (part.type === "equal") return `<span class="same">${block(part.text)}</span>`;
+    if (part.type === "delete") return `<del>${block(part.original_text)}</del>`;
+    if (part.type === "insert") return `<ins>${block(part.revised_text)}</ins>`;
+    if (part.type === "replace") {
+      return `<span class="swap"><del>${block(part.original_text)}</del><span class="arrow">→</span><ins>${block(part.revised_text)}</ins></span>`;
+    }
+    return "";
+  }).join("");
+}
+
+function renderReason(reason) {
+  const sourceTitles = reason.source_titles ?? reason.source_context_titles ?? [];
+  return `
+    <article class="reason">
+      <div><span class="badge">${esc(reason.category)}</span></div>
+      <p>${block(reason.explanation)}</p>
+      <dl>
+        <dt>원문</dt><dd>${block(reason.original_text)}</dd>
+        <dt>수정</dt><dd>${block(reason.revised_text)}</dd>
+      </dl>
+      ${sourceTitles.length ? `<ul>${sourceTitles.map((title) => `<li>${esc(title)}</li>`).join("")}</ul>` : ""}
+    </article>
+  `;
+}
+
+function renderContext(context) {
+  return `
+    <article class="context">
+      <span class="badge">${esc(context.source_type)}</span>
+      <h4>${esc(context.title)}</h4>
+      <p>${block(context.content)}</p>
+    </article>
+  `;
+}
+
+function renderError(error) {
+  app.innerHTML = `
+    <section class="hero error">
+      <h1>JSON 로딩 실패</h1>
+      <p>${esc(error.message)}</p>
+      <p class="muted">브라우저가 file:// JSON 읽기를 막으면 아래 명령으로 열어주세요.</p>
+      <pre>python3 -m http.server 8765 --directory /Users/Proposition/Documents/Dev/ai_part/tests/artifacts</pre>
+      <p class="muted">그 다음 http://127.0.0.1:8765/academic_plan_openai_latest.html 로 접속하면 자동 반영됩니다.</p>
+    </section>
+  `;
+}
+
+function count(value) {
+  return String(value ?? "").length;
+}
+
+loadJson(true);
+setInterval(() => loadJson(false), POLL_MS);
+</script>
+</body>
+</html>

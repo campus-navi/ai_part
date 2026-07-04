@@ -85,6 +85,8 @@ Rules:
 - Preserve the user's facts. Do not invent awards, courses completed, internships, grades, or research.
 - Improve specificity, fit to the target major, section structure, and admissions tone.
 - For every section, call the local skill and reference tools before writing the final answer.
+- For every section, call count_korean_characters on the original and revised content before final output.
+- If count_korean_characters shows revised_content is below the required minimum, expand the same section before final output.
 - If mcp_* tools are available, use them as additional RAG evidence.
 - Return Korean structured output only.
 - Each section must include section_key, revised_content, revision reasons, and retrieved context.
@@ -236,7 +238,6 @@ class OpenAIAcademicPlanReviewer:
                     instructions=ACADEMIC_PLAN_AGENT_INSTRUCTIONS,
                     model=self.config.model,
                     model_settings=ModelSettings(
-                        temperature=0.2,
                         max_tokens=self.config.max_tokens,
                         parallel_tool_calls=True,
                     ),
@@ -244,21 +245,74 @@ class OpenAIAcademicPlanReviewer:
                     mcp_servers=mcp_servers,
                     output_type=AcademicPlanAgentOutput,
                 )
-                result = await Runner.run(agent, _format_agent_input(request))
+                section_outputs = []
+                for section in request.sections:
+                    section_outputs.append(
+                        await _run_section_agent(
+                            Runner,
+                            agent,
+                            AcademicPlanReviewRequest(
+                                document_type=request.document_type,
+                                metadata=request.metadata,
+                                sections=[section],
+                            ),
+                        )
+                    )
         except AcademicPlanConfigurationError:
             raise
         except Exception as exc:
             raise AcademicPlanExecutionError(f"academic plan review failed: {exc}") from exc
 
+        return _assemble_review_response(
+            request,
+            AcademicPlanAgentOutput(
+                sections=section_outputs,
+                overall_comment=_build_overall_comment(section_outputs),
+            ),
+        )
+
+
+async def _run_section_agent(
+    runner: Any,
+    agent: Any,
+    request: AcademicPlanReviewRequest,
+) -> AcademicPlanAgentSectionRevision:
+    expected_key = request.sections[0].section_key
+    original = request.sections[0].content
+    retry_reason: str | None = None
+
+    for _ in range(2):
+        result = await runner.run(agent, _format_agent_input(request, retry_reason))
         if result.final_output is None:
-            raise AcademicPlanExecutionError("AI response did not include final output")
+            retry_reason = "AI response did not include final output"
+            continue
         try:
             output = AcademicPlanAgentOutput.model_validate(result.final_output)
-            return _assemble_review_response(request, output)
-        except AcademicPlanExecutionError:
-            raise
         except Exception as exc:
-            raise AcademicPlanExecutionError("AI response did not match expected schema") from exc
+            retry_reason = f"AI response did not match expected schema: {exc}"
+            continue
+
+        matching = [section for section in output.sections if section.section_key == expected_key]
+        if len(matching) != 1:
+            retry_reason = (
+                f"AI response section mismatch: expected [{expected_key}], "
+                f"got {[section.section_key for section in output.sections]}"
+            )
+            continue
+
+        try:
+            _validate_revision_length(expected_key, original, matching[0].revised_content)
+        except AcademicPlanExecutionError as exc:
+            retry_reason = str(exc)
+            continue
+        return matching[0]
+
+    raise AcademicPlanExecutionError(retry_reason or "AI response did not include a valid section")
+
+
+def _build_overall_comment(sections: list[AcademicPlanAgentSectionRevision]) -> str:
+    titles = ", ".join(SECTION_TITLES.get(section.section_key, section.section_key) for section in sections)
+    return f"{titles} 섹션을 첨삭 기준에 따라 보완했습니다."
 
 
 def _validate_request(request: AcademicPlanReviewRequest) -> None:
@@ -301,7 +355,17 @@ def _build_tools() -> list[Any]:
         """Build a unified diff between the original and revised section."""
         return build_section_diff_impl(section_key, original_content, revised_content)
 
-    return [load_academic_plan_skill, retrieve_reference_examples, build_section_diff]
+    @function_tool
+    def count_korean_characters(text: str) -> dict[str, int]:
+        """Count Korean application characters, excluding whitespace."""
+        return count_korean_characters_impl(text)
+
+    return [
+        load_academic_plan_skill,
+        retrieve_reference_examples,
+        build_section_diff,
+        count_korean_characters,
+    ]
 
 
 def _load_academic_plan_skill_impl(major_type: str, section_key: str) -> dict[str, Any]:
@@ -370,6 +434,13 @@ def build_section_diff_impl(section_key: str, original_content: str, revised_con
             lineterm="",
         )
     )
+
+
+def count_korean_characters_impl(text: str) -> dict[str, int]:
+    return {
+        "characters": len(text),
+        "characters_without_whitespace": len(re.sub(r"\s+", "", text)),
+    }
 
 
 def build_text_changes_impl(original_content: str, revised_content: str) -> list[TextChange]:
@@ -450,6 +521,7 @@ def _assemble_review_response(
     sections = []
     for section in agent_output.sections:
         original = originals[section.section_key]
+        _validate_revision_length(section.section_key, original, section.revised_content)
         sections.append(
             AcademicPlanSectionReview(
                 section_key=section.section_key,
@@ -473,6 +545,26 @@ def _assemble_review_response(
     )
 
 
+def _validate_revision_length(section_key: str, original_content: str, revised_content: str) -> None:
+    original_len = len(original_content)
+    revised_len = len(revised_content)
+    minimum = _minimum_revised_length(original_len)
+    if minimum and revised_len < minimum:
+        raise AcademicPlanExecutionError(
+            f"{section_key} revised_content is too short: original={original_len}, revised={revised_len}, minimum={minimum}"
+        )
+    if revised_len > 1000:
+        raise AcademicPlanExecutionError(
+            f"{section_key} revised_content exceeds 1000 characters: revised={revised_len}"
+        )
+
+
+def _minimum_revised_length(original_len: int) -> int | None:
+    if original_len < 700:
+        return None
+    return max(650, int(original_len * 0.8))
+
+
 def _normalize_review_response(
     request: AcademicPlanReviewRequest,
     response: AcademicPlanReviewResponse,
@@ -494,10 +586,28 @@ def _normalize_review_response(
     )
 
 
-def _format_agent_input(request: AcademicPlanReviewRequest) -> str:
+def _format_agent_input(
+    request: AcademicPlanReviewRequest,
+    retry_reason: str | None = None,
+) -> str:
+    section = request.sections[0] if len(request.sections) == 1 else None
+    length_policy = ""
+    if section:
+        original_len = len(section.content)
+        minimum = _minimum_revised_length(original_len)
+        if minimum:
+            length_policy = (
+                "\nLength policy for this section:\n"
+                f"- original characters: {original_len}\n"
+                f"- revised_content must be at least {minimum} characters and at most 1000 characters.\n"
+                "- Use count_korean_characters on original content and revised_content before final output.\n"
+            )
+    retry_policy = f"\nPrevious attempt failed: {retry_reason}\nFix only that issue.\n" if retry_reason else ""
     return (
         "Revise this academic plan request. Use tools before final output.\n"
         f"{request.model_dump_json(indent=2)}"
+        f"{length_policy}"
+        f"{retry_policy}"
     )
 
 
