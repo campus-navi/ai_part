@@ -34,8 +34,6 @@
   .inline-diff { padding:12px; background:#f8fafc; border:1px solid var(--line); border-radius:6px; }
   del { color:var(--red); background:#fee4e2; text-decoration:line-through; padding:1px 3px; border-radius:4px; }
   ins { color:var(--green); background:#dcfae6; text-decoration:none; padding:1px 3px; border-radius:4px; }
-  .highlighted-text { padding:10px; background:#fcfcfd; border:1px solid var(--line); border-radius:6px; }
-  .highlight-fragment { padding:2px 4px; border-radius:4px; }
   .block-diff { display:block; padding:10px; border-radius:6px; }
   .has-tooltip { position:relative; cursor:help; }
   .has-tooltip:hover::after { content:attr(data-tooltip); position:absolute; z-index:20; left:0; bottom:calc(100% + 8px); width:min(420px, 80vw); white-space:pre-wrap; color:#101828; background:#fff; border:1px solid var(--line); border-radius:8px; box-shadow:0 12px 28px rgb(16 24 40 / 16%); padding:10px 12px; font-size:12px; line-height:1.5; text-decoration:none; }
@@ -161,11 +159,11 @@ function renderSection(section, index) {
       <div class="two-col">
         <article>
           <h3>원문 <span class="muted">${count(section.original_content)}자</span></h3>
-          <p class="highlighted-text">${renderHighlightedContent(section.original_content, section.changes ?? [], "original", section.reasons ?? [])}</p>
+          <p>${block(section.original_content)}</p>
         </article>
         <article>
           <h3>수정문 <span class="muted">${count(section.revised_content)}자</span></h3>
-          <p class="highlighted-text">${renderHighlightedContent(section.revised_content, section.changes ?? [], "revised", section.reasons ?? [])}</p>
+          <p>${block(section.revised_content)}</p>
         </article>
       </div>
 
@@ -206,9 +204,8 @@ function renderChange(change, reasons) {
         <div><h4>원문</h4><p>${renderBlockDiff("delete", change.original_text, tooltip)}</p></div>
         <div><h4>수정</h4><p>${renderBlockDiff("insert", change.revised_text, tooltip)}</p></div>
       </div>
-      ${(change.inline_diff ?? []).length
-        ? `<h4>부분 변경</h4><p class="inline-diff">${renderInlineDiff(change.inline_diff, tooltip)}</p>`
-        : `<p class="muted">문단 재구성 변경이라 부분 강조를 생략했습니다.</p>`}
+      <h4>부분 변경</h4>
+      <p class="inline-diff">${renderInlineDiff(diffParts(change), tooltip)}</p>
     </article>
   `;
 }
@@ -217,64 +214,6 @@ function renderBlockDiff(type, text, tooltip) {
   if (!text) return "";
   const tag = type === "delete" ? "del" : "ins";
   return `<${tag} class="block-diff has-tooltip" data-tooltip="${attr(tooltip)}">${block(text)}</${tag}>`;
-}
-
-function renderHighlightedContent(text, changes, side, reasons) {
-  const source = String(text ?? "");
-  const ranges = changes
-    .map((change) => {
-      const snippet = side === "original" ? change.original_text : change.revised_text;
-      if (!snippet) return null;
-      const match = findTextRange(source, String(snippet));
-      if (!match) return null;
-      return {
-        start: match.start,
-        end: match.end,
-        tag: side === "original" ? "del" : "ins",
-        tooltip: reasonTooltip(change, reasons),
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.start - b.start);
-
-  if (!ranges.length) return block(source);
-
-  let cursor = 0;
-  let html = "";
-  for (const range of ranges) {
-    if (range.start < cursor) continue;
-    html += block(source.slice(cursor, range.start));
-    html += `<${range.tag} class="highlight-fragment has-tooltip" data-tooltip="${attr(range.tooltip)}">${block(source.slice(range.start, range.end))}</${range.tag}>`;
-    cursor = range.end;
-  }
-  html += block(source.slice(cursor));
-  return html;
-}
-
-function findTextRange(source, snippet) {
-  const exactStart = source.indexOf(snippet);
-  if (exactStart >= 0) return { start: exactStart, end: exactStart + snippet.length };
-
-  const sourceMap = compactWithMap(source);
-  const compactSnippet = snippet.replace(/\s+/g, "");
-  const compactStart = sourceMap.text.indexOf(compactSnippet);
-  if (compactStart < 0) return null;
-  const compactEnd = compactStart + compactSnippet.length - 1;
-  return {
-    start: sourceMap.map[compactStart],
-    end: sourceMap.map[compactEnd] + 1,
-  };
-}
-
-function compactWithMap(text) {
-  let compact = "";
-  const map = [];
-  [...String(text)].forEach((char, index) => {
-    if (/\s/.test(char)) return;
-    map.push(index);
-    compact += char;
-  });
-  return { text: compact, map };
 }
 
 function renderStage(stage) {
@@ -299,6 +238,39 @@ function renderInlineDiff(parts, tooltip) {
     }
     return "";
   }).join("");
+}
+
+function diffParts(change) {
+  if ((change.inline_diff ?? []).length) return change.inline_diff;
+  return compactDiff(String(change.original_text ?? ""), String(change.revised_text ?? ""));
+}
+
+function compactDiff(original, revised) {
+  const prefix = commonPrefixLength(original, revised);
+  const suffix = commonSuffixLength(original, revised, prefix);
+  const parts = [];
+  if (prefix) parts.push({ type: "equal", text: original.slice(0, prefix) });
+  const originalMid = original.slice(prefix, original.length - suffix);
+  const revisedMid = revised.slice(prefix, revised.length - suffix);
+  if (originalMid && revisedMid) parts.push({ type: "replace", original_text: originalMid, revised_text: revisedMid });
+  else if (originalMid) parts.push({ type: "delete", original_text: originalMid });
+  else if (revisedMid) parts.push({ type: "insert", revised_text: revisedMid });
+  if (suffix) parts.push({ type: "equal", text: original.slice(original.length - suffix) });
+  return parts;
+}
+
+function commonPrefixLength(a, b) {
+  const limit = Math.min(a.length, b.length);
+  let index = 0;
+  while (index < limit && a[index] === b[index]) index += 1;
+  return index;
+}
+
+function commonSuffixLength(a, b, prefix) {
+  const limit = Math.min(a.length, b.length) - prefix;
+  let count = 0;
+  while (count < limit && a[a.length - 1 - count] === b[b.length - 1 - count]) count += 1;
+  return count;
 }
 
 function reasonTooltip(change, reasons) {
