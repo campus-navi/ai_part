@@ -35,6 +35,11 @@ opendataloader-pdf-hybrid --port 5002 --force-ocr --ocr-lang "ko,en"
 - `POST /ai/official/process/batch`: 공지 여러 건을 항목별 성공/실패로 분석
 - `POST /ai/academic-plan/review`: 학업계획서 섹션별 첨삭, diff, 수정 이유 생성
 
+학업계획서 첨삭 기준은 `skills/academic_plan_review/SKILL.md`에서 읽습니다.
+섹션별 모범 사례가 쌓이면 MCP RAG 서버나 `retrieve_reference_examples` 쪽만 확장하면 됩니다.
+AI Agent는 수정문과 수정 이유만 생성하고, `original_content`, `diff`, `changes`,
+`inline_diff`는 서버가 계산해 최종 응답 JSON을 조립합니다.
+
 분석기는 OpenAI Responses API로 `structured_text`, `image_urls`,
 `attachment_urls`를 함께 전달해 멀티모달로 분석합니다. 응답은 Pydantic 스키마로
 검증하며, `tag_code`는 Spring 백엔드의 seed 태그 코드(`COURSE`, `ACADEMIC`,
@@ -84,4 +89,10 @@ PDF와 OpenAI file inputs가 지원하는 문서/스프레드시트/프레젠테
 
 ```bash
 .venv/bin/python -m pytest
+```
+
+OpenAI API를 실제 호출하는 학업계획서 첨삭 smoke test:
+
+```bash
+RUN_OPENAI_API_TESTS=1 .venv/bin/python -m pytest -s tests/test_academic_plan_openai_api.py
 ```

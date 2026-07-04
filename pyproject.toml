@@ -21,3 +21,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests that call external services such as the OpenAI API",
+]

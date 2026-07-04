@@ -1,14 +1,18 @@
 from fastapi.testclient import TestClient
 
 from app.academic_plan import (
+    AcademicPlanAgentOutput,
+    AcademicPlanAgentSectionRevision,
     AcademicPlanMetadata,
     AcademicPlanReviewRequest,
     AcademicPlanReviewResponse,
     AcademicPlanSectionReview,
     RevisionReason,
+    _assemble_review_response,
     _load_academic_plan_skill_impl,
     _normalize_review_response,
     _retrieve_reference_examples_impl,
+    build_inline_diff_impl,
     build_section_diff_impl,
 )
 from app.main import app, get_academic_plan_reviewer
@@ -82,6 +86,8 @@ def test_academic_plan_tools_return_skill_and_examples():
 
     assert skill["major_type_label"] == "이중전공"
     assert "학업계획" in skill["section_title"]
+    assert "졸업 사정표" in skill["skill"]
+    assert "가독성" in skill["checklist"]
     assert examples[0]["source_type"] == "example"
     assert "과목" in examples[0]["content"]
 
@@ -126,6 +132,60 @@ def test_normalize_review_response_fills_original_content_and_diff():
     assert "--- study_plan.original" in section.diff
     assert "-경제학 과목을 듣겠습니다." in section.diff
     assert "+미시경제학과 통계학을 먼저 수강한 뒤 계량경제 프로젝트로 확장하겠습니다." in section.diff
+    assert section.changes[0].type == "replace"
+    assert section.changes[0].original_text == "경제학 과목을 듣겠습니다."
+
+
+def test_assemble_review_response_uses_smaller_agent_output():
+    request = AcademicPlanReviewRequest(
+        document_type="ACADEMIC_PLAN",
+        metadata=AcademicPlanMetadata(
+            major_type="DOUBLE_MAJOR",
+            target_name="경제학과",
+            user_department="컴퓨터공학과",
+        ),
+        sections=[
+            {
+                "section_key": "application_motive",
+                "content": "경제학을 매우 열심히 공부하겠습니다.",
+            }
+        ],
+    )
+    output = AcademicPlanAgentOutput(
+        sections=[
+            AcademicPlanAgentSectionRevision(
+                section_key="application_motive",
+                revised_content="경제학을 체계적으로 공부하겠습니다.",
+                reasons=[
+                    RevisionReason(
+                        category="specificity",
+                        reason="추상적 태도 표현을 학업 방식으로 구체화했습니다.",
+                    )
+                ],
+            )
+        ],
+        overall_comment="표현이 구체화되었습니다.",
+    )
+
+    response = _assemble_review_response(request, output)
+    section = response.sections[0]
+
+    assert section.original_content == "경제학을 매우 열심히 공부하겠습니다."
+    assert section.revised_content == "경제학을 체계적으로 공부하겠습니다."
+    assert section.diff
+    assert section.changes[0].inline_diff
+    assert any(part.type == "replace" for part in section.changes[0].inline_diff)
+
+
+def test_inline_diff_marks_only_changed_phrase():
+    diff = build_inline_diff_impl(
+        "경제학을 매우 열심히 공부하겠습니다.",
+        "경제학을 체계적으로 공부하겠습니다.",
+    )
+
+    changed = [part for part in diff if part.type == "replace"]
+    assert changed[0].original_text == "매우 열심히"
+    assert changed[0].revised_text == "체계적으로"
 
 
 def test_build_section_diff_returns_empty_string_for_unchanged_text():

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 import shlex
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +34,8 @@ RevisionCategory = Literal[
     "evidence",
     "tone",
 ]
+TextChangeType = Literal["replace", "insert", "delete"]
+InlineDiffType = Literal["equal", "replace", "insert", "delete"]
 
 
 MAJOR_TYPE_LABELS: dict[str, str] = {
@@ -40,28 +45,13 @@ MAJOR_TYPE_LABELS: dict[str, str] = {
     "STUDENT_DESIGN": "학생설계전공",
 }
 
-SECTION_GUIDES: dict[str, dict[str, str]] = {
-    "application_motive": {
-        "title": "지원동기",
-        "skill": "전공 선택의 계기, 기존 전공과의 연결, 목표 전공이 필요한 이유를 한 흐름으로 묶는다.",
-        "checklist": "막연한 흥미보다 경험-문제의식-전공 필요성 순서로 구체화한다.",
-    },
-    "interest_field": {
-        "title": "관심분야",
-        "skill": "관심 주제를 전공 내 세부 분야와 연결하고, 탐구 질문이나 적용 장면을 제시한다.",
-        "checklist": "키워드 나열을 피하고 왜 그 분야가 필요한지 설명한다.",
-    },
-    "study_plan": {
-        "title": "학업계획",
-        "skill": "수강, 프로젝트, 연구, 비교과 활동을 학기 또는 단계별 계획으로 정리한다.",
-        "checklist": "과목명만 나열하지 말고 실행 방식과 산출물을 포함한다.",
-    },
-    "etc_info": {
-        "title": "기타",
-        "skill": "역량, 준비도, 향후 진로처럼 앞 섹션을 보완하는 정보를 중복 없이 배치한다.",
-        "checklist": "자기소개 반복보다 선발자가 판단할 추가 근거를 담는다.",
-    },
+SECTION_TITLES: dict[str, str] = {
+    "application_motive": "지원동기",
+    "interest_field": "관심분야",
+    "study_plan": "학업계획",
+    "etc_info": "기타",
 }
+SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "academic_plan_review" / "SKILL.md"
 
 REFERENCE_EXAMPLES: tuple[dict[str, str], ...] = (
     {
@@ -97,7 +87,8 @@ Rules:
 - For every section, call the local skill and reference tools before writing the final answer.
 - If mcp_* tools are available, use them as additional RAG evidence.
 - Return Korean structured output only.
-- Each section must include original_content, revised_content, a unified diff, and revision reasons.
+- Each section must include section_key, revised_content, revision reasons, and retrieved context.
+- Do not generate original_content, diff, changes, or inline_diff. The server computes them.
 - Each revision reason must name the changed text, the reason, and the supporting skill/example/MCP evidence.
 """.strip()
 
@@ -143,6 +134,40 @@ class RevisionReason(BaseModel):
     evidence: list[str] = Field(default_factory=list)
 
 
+class InlineDiffPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: InlineDiffType
+    text: str | None = None
+    original_text: str | None = None
+    revised_text: str | None = None
+
+
+class TextChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: TextChangeType
+    original_text: str | None = None
+    revised_text: str | None = None
+    inline_diff: list[InlineDiffPart] = Field(default_factory=list)
+
+
+class AcademicPlanAgentSectionRevision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_key: SectionKey
+    revised_content: str
+    reasons: list[RevisionReason]
+    retrieved_context: list[RetrievedContext] = Field(default_factory=list)
+
+
+class AcademicPlanAgentOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sections: list[AcademicPlanAgentSectionRevision]
+    overall_comment: str
+
+
 class AcademicPlanSectionReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -150,6 +175,7 @@ class AcademicPlanSectionReview(BaseModel):
     original_content: str
     revised_content: str
     diff: str = ""
+    changes: list[TextChange] = Field(default_factory=list)
     reasons: list[RevisionReason]
     retrieved_context: list[RetrievedContext] = Field(default_factory=list)
 
@@ -216,7 +242,7 @@ class OpenAIAcademicPlanReviewer:
                     ),
                     tools=_build_tools(),
                     mcp_servers=mcp_servers,
-                    output_type=AcademicPlanReviewResponse,
+                    output_type=AcademicPlanAgentOutput,
                 )
                 result = await Runner.run(agent, _format_agent_input(request))
         except AcademicPlanConfigurationError:
@@ -227,8 +253,8 @@ class OpenAIAcademicPlanReviewer:
         if result.final_output is None:
             raise AcademicPlanExecutionError("AI response did not include final output")
         try:
-            output = AcademicPlanReviewResponse.model_validate(result.final_output)
-            return _normalize_review_response(request, output)
+            output = AcademicPlanAgentOutput.model_validate(result.final_output)
+            return _assemble_review_response(request, output)
         except AcademicPlanExecutionError:
             raise
         except Exception as exc:
@@ -279,17 +305,36 @@ def _build_tools() -> list[Any]:
 
 
 def _load_academic_plan_skill_impl(major_type: str, section_key: str) -> dict[str, Any]:
-    section = SECTION_GUIDES.get(section_key, SECTION_GUIDES["etc_info"])
+    sections = _load_academic_plan_skill_sections()
     return {
         "source_type": "skill",
+        "source_path": str(SKILL_PATH),
         "major_type": major_type,
         "major_type_label": MAJOR_TYPE_LABELS.get(major_type, major_type),
         "section_key": section_key,
-        "section_title": section["title"],
-        "skill": section["skill"],
-        "checklist": section["checklist"],
+        "section_title": SECTION_TITLES.get(section_key, section_key),
+        "skill": sections.get(section_key, ""),
+        "checklist": sections.get("common", ""),
         "common_rule": "전공 적합성, 구체성, 실행 가능성을 우선하고 사실을 새로 만들지 않는다.",
     }
+
+
+@lru_cache(maxsize=1)
+def _load_academic_plan_skill_sections() -> dict[str, str]:
+    text = SKILL_PATH.read_text(encoding="utf-8")
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+
+    for line in text.splitlines():
+        match = re.match(r"^##\s+([a-z_]+)\s*$", line)
+        if match:
+            current = match.group(1)
+            sections[current] = []
+            continue
+        if current:
+            sections[current].append(line)
+
+    return {key: "\n".join(lines).strip() for key, lines in sections.items()}
 
 
 def _retrieve_reference_examples_impl(
@@ -327,12 +372,75 @@ def build_section_diff_impl(section_key: str, original_content: str, revised_con
     )
 
 
-def _normalize_review_response(
+def build_text_changes_impl(original_content: str, revised_content: str) -> list[TextChange]:
+    original_units = _split_revision_units(original_content)
+    revised_units = _split_revision_units(revised_content)
+    matcher = difflib.SequenceMatcher(None, original_units, revised_units)
+    changes: list[TextChange] = []
+
+    for tag, original_start, original_end, revised_start, revised_end in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        original_text = "\n\n".join(original_units[original_start:original_end]) or None
+        revised_text = "\n\n".join(revised_units[revised_start:revised_end]) or None
+        changes.append(
+            TextChange(
+                type=tag,
+                original_text=original_text,
+                revised_text=revised_text,
+                inline_diff=build_inline_diff_impl(original_text or "", revised_text or ""),
+            )
+        )
+
+    return changes
+
+
+def build_inline_diff_impl(original_text: str, revised_text: str) -> list[InlineDiffPart]:
+    matcher = difflib.SequenceMatcher(None, original_text, revised_text)
+    parts: list[InlineDiffPart] = []
+
+    for tag, original_start, original_end, revised_start, revised_end in matcher.get_opcodes():
+        original_part = original_text[original_start:original_end]
+        revised_part = revised_text[revised_start:revised_end]
+        if tag == "equal":
+            parts.append(InlineDiffPart(type="equal", text=original_part))
+        elif tag == "replace":
+            parts.append(
+                InlineDiffPart(
+                    type="replace",
+                    original_text=original_part,
+                    revised_text=revised_part,
+                )
+            )
+        elif tag == "delete":
+            parts.append(InlineDiffPart(type="delete", original_text=original_part))
+        elif tag == "insert":
+            parts.append(InlineDiffPart(type="insert", revised_text=revised_part))
+
+    return parts
+
+
+def _split_revision_units(text: str) -> list[str]:
+    units: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text.strip()):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        sentences = [
+            item.strip()
+            for item in re.findall(r".+?(?:[.!?。！？](?:\s+|$)|$)", paragraph, flags=re.S)
+            if item.strip()
+        ]
+        units.extend(sentences or [paragraph])
+    return units or [text]
+
+
+def _assemble_review_response(
     request: AcademicPlanReviewRequest,
-    response: AcademicPlanReviewResponse,
+    agent_output: AcademicPlanAgentOutput,
 ) -> AcademicPlanReviewResponse:
     originals = {section.section_key: section.content for section in request.sections}
-    response_keys = {section.section_key for section in response.sections}
+    response_keys = {section.section_key for section in agent_output.sections}
     request_keys = set(originals)
     if response_keys != request_keys:
         raise AcademicPlanExecutionError(
@@ -340,27 +448,49 @@ def _normalize_review_response(
         )
 
     sections = []
-    for section in response.sections:
+    for section in agent_output.sections:
         original = originals[section.section_key]
         sections.append(
-            section.model_copy(
-                update={
-                    "original_content": original,
-                    "diff": build_section_diff_impl(
-                        section.section_key,
-                        original,
-                        section.revised_content,
-                    ),
-                }
+            AcademicPlanSectionReview(
+                section_key=section.section_key,
+                original_content=original,
+                revised_content=section.revised_content,
+                diff=build_section_diff_impl(
+                    section.section_key,
+                    original,
+                    section.revised_content,
+                ),
+                changes=build_text_changes_impl(original, section.revised_content),
+                reasons=section.reasons,
+                retrieved_context=section.retrieved_context,
             )
         )
 
-    return response.model_copy(
-        update={
-            "document_type": "ACADEMIC_PLAN",
-            "metadata": request.metadata,
-            "sections": sections,
-        }
+    return AcademicPlanReviewResponse(
+        metadata=request.metadata,
+        sections=sections,
+        overall_comment=agent_output.overall_comment,
+    )
+
+
+def _normalize_review_response(
+    request: AcademicPlanReviewRequest,
+    response: AcademicPlanReviewResponse,
+) -> AcademicPlanReviewResponse:
+    return _assemble_review_response(
+        request,
+        AcademicPlanAgentOutput(
+            sections=[
+                AcademicPlanAgentSectionRevision(
+                    section_key=section.section_key,
+                    revised_content=section.revised_content,
+                    reasons=section.reasons,
+                    retrieved_context=section.retrieved_context,
+                )
+                for section in response.sections
+            ],
+            overall_comment=response.overall_comment,
+        ),
     )
 
 
