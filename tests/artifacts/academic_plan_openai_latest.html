@@ -43,6 +43,13 @@
   dd { margin:0; }
   ul { margin:8px 0 0; padding-left:20px; }
   pre { overflow:auto; white-space:pre-wrap; background:#101828; color:#e4e7ec; border-radius:8px; padding:14px; }
+  .diff-view { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.55; }
+  .diff-line { display:block; min-height:1.55em; padding:0 4px; border-radius:3px; }
+  .diff-file { color:#93c5fd; font-weight:700; }
+  .diff-hunk { color:#fbbf24; background:#1f2937; }
+  .diff-add { color:#bbf7d0; background:#064e3b; }
+  .diff-del { color:#fecaca; background:#7f1d1d; }
+  .diff-context { color:#e4e7ec; }
   .error { border-color:#fecdca; background:#fffbfa; color:#912018; }
   @media (max-width: 760px) { .top, .meta, .two-col, .change-grid { display:block; } .actions { margin-top:12px; } main { padding:20px 12px 44px; } }
 </style>
@@ -168,13 +175,8 @@ function renderSection(section, index) {
       </div>
 
       <details open>
-        <summary>스킬 적용 단계</summary>
-        ${(section.revision_stages ?? []).map(renderStage).join("") || "<p class='muted'>단계 기록 없음</p>"}
-      </details>
-
-      <details open>
-        <summary>변경 사항</summary>
-        ${(section.changes ?? []).map((change) => renderChange(change, section.reasons ?? [])).join("") || "<p class='muted'>변경 사항 없음</p>"}
+        <summary>문장별 수정 제안</summary>
+        ${renderSuggestions(section)}
       </details>
 
       <details open>
@@ -184,7 +186,7 @@ function renderSection(section, index) {
 
       <details>
         <summary>Diff 원문</summary>
-        <pre>${esc(section.diff)}</pre>
+        ${renderUnifiedDiff(section.diff)}
       </details>
 
       <details>
@@ -195,17 +197,31 @@ function renderSection(section, index) {
   `;
 }
 
-function renderChange(change, reasons) {
-  const tooltip = reasonTooltip(change, reasons);
+function renderSuggestions(section) {
+  const suggestions = section.suggestions ?? section.changes ?? [];
+  return suggestions.map((suggestion) => renderSuggestion(suggestion, section.reasons ?? [])).join("")
+    || "<p class='muted'>수정 제안 없음</p>";
+}
+
+function renderSuggestion(suggestion, reasons) {
+  const tooltip = suggestionTooltip(suggestion, reasons);
+  const suggestedText = suggestion.suggested_text ?? suggestion.revised_text;
+  const previewDiff = suggestion.preview_diff ?? suggestion.inline_diff ?? [];
+  const range = suggestion.original_range
+    ? ` · ${suggestion.original_range.start}-${suggestion.original_range.end}`
+    : "";
   return `
     <article class="change">
-      <div><span class="badge change-type">${esc(change.type)}</span></div>
-      <div class="change-grid">
-        <div><h4>원문</h4><p>${renderBlockDiff("delete", change.original_text, tooltip)}</p></div>
-        <div><h4>수정</h4><p>${renderBlockDiff("insert", change.revised_text, tooltip)}</p></div>
+      <div>
+        <span class="badge change-type">${esc(suggestion.type)}</span>
+        <span class="muted">${esc(suggestion.suggestion_id ?? "")}${esc(range)}</span>
       </div>
-      ${(change.inline_diff ?? []).length
-        ? `<h4>부분 변경</h4><p class="inline-diff">${renderInlineDiff(change.inline_diff, tooltip)}</p>`
+      <div class="change-grid">
+        <div><h4>원문</h4><p>${renderBlockDiff("delete", suggestion.original_text, tooltip)}</p></div>
+        <div><h4>수정</h4><p>${renderBlockDiff("insert", suggestedText, tooltip)}</p></div>
+      </div>
+      ${previewDiff.length
+        ? `<h4>부분 변경</h4><p class="inline-diff">${renderInlineDiff(previewDiff, tooltip)}</p>`
         : `<p class="muted">문단 재구성 변경이라 부분 강조를 생략했습니다.</p>`}
     </article>
   `;
@@ -215,18 +231,6 @@ function renderBlockDiff(type, text, tooltip) {
   if (!text) return "";
   const tag = type === "delete" ? "del" : "ins";
   return `<${tag} class="block-diff has-tooltip" data-tooltip="${attr(tooltip)}">${block(text)}</${tag}>`;
-}
-
-function renderStage(stage) {
-  return `
-    <article class="change">
-      <div><span class="badge">${esc(stage.skill_name)}</span></div>
-      <div class="change-grid">
-        <div><h4>적용 전</h4><p>${block(stage.before_content)}</p></div>
-        <div><h4>적용 후</h4><p>${block(stage.after_content)}</p></div>
-      </div>
-    </article>
-  `;
 }
 
 function renderInlineDiff(parts, tooltip) {
@@ -239,6 +243,14 @@ function renderInlineDiff(parts, tooltip) {
     }
     return "";
   }).join("");
+}
+
+function suggestionTooltip(suggestion, reasons) {
+  if (suggestion.reason?.summary) {
+    const label = suggestion.reason.category ? `[${suggestion.reason.category}] ` : "";
+    return `${label}${suggestion.reason.summary}`;
+  }
+  return reasonTooltip(suggestion, reasons);
 }
 
 function reasonTooltip(change, reasons) {
@@ -291,6 +303,20 @@ function renderContext(context) {
       <p>${block(context.content)}</p>
     </article>
   `;
+}
+
+function renderUnifiedDiff(diff) {
+  if (!diff) return "<p class='muted'>변경 없음</p>";
+  return `<pre class="diff-view">${String(diff).split("\n").map(renderDiffLine).join("")}</pre>`;
+}
+
+function renderDiffLine(line) {
+  let type = "diff-context";
+  if (line.startsWith("@@")) type = "diff-hunk";
+  else if (line.startsWith("---") || line.startsWith("+++")) type = "diff-file";
+  else if (line.startsWith("+")) type = "diff-add";
+  else if (line.startsWith("-")) type = "diff-del";
+  return `<span class="diff-line ${type}">${esc(line) || " "}</span>`;
 }
 
 function renderError(error) {

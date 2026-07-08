@@ -98,7 +98,7 @@ Rules:
 - If mcp_* tools are available, use them as additional RAG evidence.
 - Return Korean structured output only.
 - Each section must include section_key, draft_content, revised_content, revision reasons, and retrieved context.
-- Do not generate original_content, diff, changes, or inline_diff. The server computes them.
+- Do not generate original_content, diff, suggestions, or preview_diff. The server computes them.
 - Each revision reason must name the changed text, the reason, and the supporting skill/example/MCP evidence.
 """.strip()
 
@@ -153,6 +153,32 @@ class InlineDiffPart(BaseModel):
     revised_text: str | None = None
 
 
+class TextRange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: int
+    end: int
+
+
+class SuggestionReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: RevisionCategory
+    summary: str
+
+
+class TextSuggestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    suggestion_id: str
+    type: TextChangeType
+    original_range: TextRange
+    original_text: str | None = None
+    suggested_text: str | None = None
+    reason: SuggestionReason
+    preview_diff: list[InlineDiffPart] = Field(default_factory=list)
+
+
 class TextChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -160,14 +186,6 @@ class TextChange(BaseModel):
     original_text: str | None = None
     revised_text: str | None = None
     inline_diff: list[InlineDiffPart] = Field(default_factory=list)
-
-
-class RevisionStage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    skill_name: Literal["academic_plan_review", "humanize_korean"]
-    before_content: str
-    after_content: str
 
 
 class AcademicPlanAgentSectionRevision(BaseModel):
@@ -194,10 +212,9 @@ class AcademicPlanSectionReview(BaseModel):
     original_content: str
     revised_content: str
     diff: str = ""
-    changes: list[TextChange] = Field(default_factory=list)
+    suggestions: list[TextSuggestion] = Field(default_factory=list)
     reasons: list[RevisionReason]
     retrieved_context: list[RetrievedContext] = Field(default_factory=list)
-    revision_stages: list[RevisionStage] = Field(default_factory=list)
 
 
 class AcademicPlanReviewResponse(BaseModel):
@@ -504,6 +521,340 @@ def build_text_changes_impl(original_content: str, revised_content: str) -> list
     return changes
 
 
+def build_text_suggestions_impl(
+    section_key: str,
+    original_content: str,
+    revised_content: str,
+    reasons: list[RevisionReason],
+) -> list[TextSuggestion]:
+    if original_content == revised_content:
+        return []
+
+    original_units = _split_revision_units_with_ranges(original_content)
+    revised_units = _split_revision_units_with_ranges(revised_content)
+    if len(original_units) == len(revised_units):
+        suggestions = []
+        for original_unit, revised_unit in zip(original_units, revised_units, strict=True):
+            if original_unit[0] == revised_unit[0]:
+                continue
+            _append_text_suggestion(
+                suggestions=suggestions,
+                section_key=section_key,
+                change_type="replace",
+                original_range=TextRange(start=original_unit[1], end=original_unit[2]),
+                original_text=original_unit[0],
+                suggested_text=revised_unit[0],
+                reasons=reasons,
+            )
+        if _apply_text_suggestions(original_content, suggestions) == revised_content:
+            return suggestions
+
+    matcher = difflib.SequenceMatcher(
+        None,
+        [unit[0] for unit in original_units],
+        [unit[0] for unit in revised_units],
+    )
+    suggestions: list[TextSuggestion] = []
+
+    for tag, original_start, original_end, revised_start, revised_end in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            _append_replacement_chunk_suggestions(
+                suggestions=suggestions,
+                section_key=section_key,
+                original_content=original_content,
+                revised_content=revised_content,
+                original_units=original_units,
+                revised_units=revised_units,
+                original_start=original_start,
+                original_end=original_end,
+                revised_start=revised_start,
+                revised_end=revised_end,
+                reasons=reasons,
+            )
+            continue
+
+        original_range, revised_range = _change_ranges(
+            tag,
+            original_units,
+            revised_units,
+            original_start,
+            original_end,
+            revised_start,
+            revised_end,
+            len(original_content),
+            len(revised_content),
+        )
+        _append_text_suggestion(
+            suggestions=suggestions,
+            section_key=section_key,
+            change_type=tag,
+            original_range=TextRange(start=original_range[0], end=original_range[1]),
+            original_text=original_content[original_range[0] : original_range[1]] or None,
+            suggested_text=revised_content[revised_range[0] : revised_range[1]] or None,
+            reasons=reasons,
+        )
+
+    if _apply_text_suggestions(original_content, suggestions) != revised_content:
+        return [
+            _make_text_suggestion(
+                section_key=section_key,
+                index=1,
+                change_type="replace",
+                original_range=TextRange(start=0, end=len(original_content)),
+                original_text=original_content,
+                suggested_text=revised_content,
+                reasons=reasons,
+            )
+        ]
+    return suggestions
+
+
+def _append_replacement_chunk_suggestions(
+    *,
+    suggestions: list[TextSuggestion],
+    section_key: str,
+    original_content: str,
+    revised_content: str,
+    original_units: list[tuple[str, int, int]],
+    revised_units: list[tuple[str, int, int]],
+    original_start: int,
+    original_end: int,
+    revised_start: int,
+    revised_end: int,
+    reasons: list[RevisionReason],
+) -> None:
+    original_count = original_end - original_start
+    revised_count = revised_end - revised_start
+    pair_count = min(original_count, revised_count)
+
+    for offset in range(pair_count):
+        original_range = _unit_range_with_separator(
+            original_units,
+            original_start + offset,
+            len(original_content),
+        )
+        revised_range = _unit_range_with_separator(
+            revised_units,
+            revised_start + offset,
+            len(revised_content),
+        )
+        _append_text_suggestion(
+            suggestions=suggestions,
+            section_key=section_key,
+            change_type="replace",
+            original_range=TextRange(start=original_range[0], end=original_range[1]),
+            original_text=original_content[original_range[0] : original_range[1]],
+            suggested_text=revised_content[revised_range[0] : revised_range[1]],
+            reasons=reasons,
+        )
+
+    if original_count > pair_count:
+        original_range = (
+            original_units[original_start + pair_count][1],
+            _unit_range_with_separator(original_units, original_end - 1, len(original_content))[1],
+        )
+        _append_text_suggestion(
+            suggestions=suggestions,
+            section_key=section_key,
+            change_type="delete",
+            original_range=TextRange(start=original_range[0], end=original_range[1]),
+            original_text=original_content[original_range[0] : original_range[1]],
+            suggested_text=None,
+            reasons=reasons,
+        )
+
+    if revised_count > pair_count:
+        insertion_point = (
+            _unit_range_with_separator(original_units, original_start + pair_count - 1, len(original_content))[1]
+            if pair_count
+            else original_units[original_start][1]
+        )
+        revised_range = (
+            revised_units[revised_start + pair_count][1],
+            _unit_range_with_separator(revised_units, revised_end - 1, len(revised_content))[1],
+        )
+        _append_text_suggestion(
+            suggestions=suggestions,
+            section_key=section_key,
+            change_type="insert",
+            original_range=TextRange(start=insertion_point, end=insertion_point),
+            original_text=None,
+            suggested_text=revised_content[revised_range[0] : revised_range[1]],
+            reasons=reasons,
+        )
+
+
+def _unit_range_with_separator(
+    units: list[tuple[str, int, int]],
+    index: int,
+    text_len: int,
+) -> tuple[int, int]:
+    start = units[index][1]
+    if index + 1 < len(units):
+        return start, units[index + 1][1]
+    return start, text_len
+
+
+def _append_text_suggestion(
+    *,
+    suggestions: list[TextSuggestion],
+    section_key: str,
+    change_type: TextChangeType,
+    original_range: TextRange,
+    original_text: str | None,
+    suggested_text: str | None,
+    reasons: list[RevisionReason],
+) -> None:
+    suggestions.append(
+        _make_text_suggestion(
+            section_key=section_key,
+            index=len(suggestions) + 1,
+            change_type=change_type,
+            original_range=original_range,
+            original_text=original_text,
+            suggested_text=suggested_text,
+            reasons=reasons,
+        )
+    )
+
+
+def _make_text_suggestion(
+    *,
+    section_key: str,
+    index: int,
+    change_type: TextChangeType,
+    original_range: TextRange,
+    original_text: str | None,
+    suggested_text: str | None,
+    reasons: list[RevisionReason],
+) -> TextSuggestion:
+    return TextSuggestion(
+        suggestion_id=f"{section_key}-{index:03d}",
+        type=change_type,
+        original_range=original_range,
+        original_text=original_text,
+        suggested_text=suggested_text,
+        reason=_suggestion_reason(original_text, suggested_text, reasons),
+        preview_diff=(
+            build_inline_diff_impl(original_text or "", suggested_text or "")
+            if _should_show_inline_diff(original_text or "", suggested_text or "")
+            else []
+        ),
+    )
+
+
+def _apply_text_suggestions(text: str, suggestions: list[TextSuggestion]) -> str:
+    result = text
+    for suggestion in sorted(suggestions, key=lambda item: item.original_range.start, reverse=True):
+        replacement = suggestion.suggested_text or ""
+        result = result[: suggestion.original_range.start] + replacement + result[suggestion.original_range.end :]
+    return result
+
+
+def _suggestion_reason(
+    original_text: str | None,
+    suggested_text: str | None,
+    reasons: list[RevisionReason],
+) -> SuggestionReason:
+    for reason in reasons:
+        if _reason_matches_text(reason, original_text, suggested_text):
+            return SuggestionReason(category=reason.category, summary=reason.reason)
+    if reasons:
+        return SuggestionReason(category=reasons[0].category, summary=reasons[0].reason)
+    return SuggestionReason(category="structure", summary="문장 구조와 표현을 개선했습니다.")
+
+
+def _reason_matches_text(
+    reason: RevisionReason,
+    original_text: str | None,
+    suggested_text: str | None,
+) -> bool:
+    return _text_overlaps(original_text, reason.original_text) or _text_overlaps(
+        suggested_text,
+        reason.revised_text,
+    )
+
+
+def _text_overlaps(text: str | None, snippet: str | None) -> bool:
+    if not text or not snippet:
+        return False
+    if snippet in text or text in snippet:
+        return True
+    compact_text = re.sub(r"\s+", "", text)
+    compact_snippet = re.sub(r"\s+", "", snippet)
+    if len(compact_snippet) < 8 or not compact_text:
+        return False
+    return compact_snippet[:24] in compact_text or compact_text[:24] in compact_snippet
+
+
+def _change_ranges(
+    tag: str,
+    original_units: list[tuple[str, int, int]],
+    revised_units: list[tuple[str, int, int]],
+    original_start: int,
+    original_end: int,
+    revised_start: int,
+    revised_end: int,
+    original_len: int,
+    revised_len: int,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    if tag == "insert":
+        original_point = _insertion_point(original_units, original_start, original_len)
+        revised_range = _inserted_range(revised_units, revised_start, revised_end, revised_len)
+        return (original_point, original_point), revised_range
+    if tag == "delete":
+        original_range = _deleted_range(original_units, original_start, original_end, original_len)
+        return original_range, (0, 0)
+    return (
+        (original_units[original_start][1], original_units[original_end - 1][2]),
+        (revised_units[revised_start][1], revised_units[revised_end - 1][2]),
+    )
+
+
+def _insertion_point(units: list[tuple[str, int, int]], index: int, text_len: int) -> int:
+    if index > 0:
+        return units[index - 1][2]
+    if index < len(units):
+        return units[index][1]
+    return text_len
+
+
+def _inserted_range(
+    revised_units: list[tuple[str, int, int]],
+    revised_start: int,
+    revised_end: int,
+    revised_len: int,
+) -> tuple[int, int]:
+    if revised_start > 0:
+        start = revised_units[revised_start - 1][2]
+    else:
+        start = revised_units[revised_start][1]
+    if revised_start == 0 and revised_end < len(revised_units):
+        end = revised_units[revised_end][1]
+    else:
+        end = revised_units[revised_end - 1][2] if revised_end > revised_start else revised_len
+    return start, end
+
+
+def _deleted_range(
+    original_units: list[tuple[str, int, int]],
+    original_start: int,
+    original_end: int,
+    original_len: int,
+) -> tuple[int, int]:
+    if original_start > 0:
+        start = original_units[original_start - 1][2]
+    else:
+        start = original_units[original_start][1]
+    if original_start == 0 and original_end < len(original_units):
+        end = original_units[original_end][1]
+    else:
+        end = original_units[original_end - 1][2] if original_end > original_start else original_len
+    return start, end
+
+
 def _should_show_inline_diff(original_text: str, revised_text: str) -> bool:
     max_len = max(len(original_text), len(revised_text))
     if max_len <= 240:
@@ -553,6 +904,21 @@ def _split_revision_units(text: str) -> list[str]:
     return units or [text]
 
 
+def _split_revision_units_with_ranges(text: str) -> list[tuple[str, int, int]]:
+    units_with_ranges: list[tuple[str, int, int]] = []
+    cursor = 0
+    for unit in _split_revision_units(text):
+        start = text.find(unit, cursor)
+        if start == -1:
+            start = text.find(unit)
+        if start == -1:
+            continue
+        end = start + len(unit)
+        units_with_ranges.append((unit, start, end))
+        cursor = end
+    return units_with_ranges or [(text, 0, len(text))]
+
+
 def _assemble_review_response(
     request: AcademicPlanReviewRequest,
     agent_output: AcademicPlanAgentOutput,
@@ -579,10 +945,14 @@ def _assemble_review_response(
                     original,
                     section.revised_content,
                 ),
-                changes=build_text_changes_impl(original, section.revised_content),
+                suggestions=build_text_suggestions_impl(
+                    section.section_key,
+                    original,
+                    section.revised_content,
+                    section.reasons,
+                ),
                 reasons=section.reasons,
                 retrieved_context=section.retrieved_context,
-                revision_stages=_build_revision_stages(original, section),
             )
         )
 
@@ -613,24 +983,6 @@ def _minimum_revised_length(original_len: int) -> int | None:
     return max(650, int(original_len * 0.8))
 
 
-def _build_revision_stages(
-    original_content: str,
-    section: AcademicPlanAgentSectionRevision,
-) -> list[RevisionStage]:
-    return [
-        RevisionStage(
-            skill_name="academic_plan_review",
-            before_content=original_content,
-            after_content=section.draft_content,
-        ),
-        RevisionStage(
-            skill_name="humanize_korean",
-            before_content=section.draft_content,
-            after_content=section.revised_content,
-        ),
-    ]
-
-
 def _normalize_review_response(
     request: AcademicPlanReviewRequest,
     response: AcademicPlanReviewResponse,
@@ -641,11 +993,7 @@ def _normalize_review_response(
             sections=[
                 AcademicPlanAgentSectionRevision(
                     section_key=section.section_key,
-                    draft_content=(
-                        section.revision_stages[-1].before_content
-                        if section.revision_stages
-                        else section.revised_content
-                    ),
+                    draft_content=section.revised_content,
                     revised_content=section.revised_content,
                     reasons=section.reasons,
                     retrieved_context=section.retrieved_context,

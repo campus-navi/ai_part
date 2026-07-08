@@ -15,6 +15,15 @@ from app.academic_plan import (
 pytestmark = pytest.mark.integration
 
 
+def _apply_suggestions(text, suggestions):
+    result = text
+    for suggestion in sorted(suggestions, key=lambda item: item.original_range.start, reverse=True):
+        result = result[: suggestion.original_range.start] + (suggestion.suggested_text or "") + result[
+            suggestion.original_range.end :
+        ]
+    return result
+
+
 def _repeat_to_length(text: str, min_length: int = 720, max_length: int = 900) -> str:
     chunks: list[str] = []
     while len("\n\n".join(chunks)) < min_length:
@@ -121,11 +130,8 @@ async def test_academic_plan_review_calls_openai_api():
         assert reviewed.revised_content
         assert reviewed.revised_content != reviewed.original_content
         assert f"--- {original.section_key}.original" in reviewed.diff
-        assert reviewed.changes
+        assert reviewed.suggestions
+        assert _apply_suggestions(reviewed.original_content, reviewed.suggestions) == reviewed.revised_content
+        assert all(suggestion.reason.summary for suggestion in reviewed.suggestions)
         assert reviewed.reasons
-        assert [stage.skill_name for stage in reviewed.revision_stages] == [
-            "academic_plan_review",
-            "humanize_korean",
-        ]
-        assert reviewed.revision_stages[0].before_content == original.content
-        assert reviewed.revision_stages[-1].after_content == reviewed.revised_content
+        assert "revision_stages" not in reviewed.model_dump()

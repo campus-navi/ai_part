@@ -53,6 +53,14 @@ class FakeAcademicPlanReviewer:
         )
 
 
+def _apply_test_suggestions(text, suggestions):
+    result = text
+    for suggestion in sorted(suggestions, key=lambda item: item.original_range.start, reverse=True):
+        replacement = suggestion.suggested_text or ""
+        result = result[: suggestion.original_range.start] + replacement + result[suggestion.original_range.end :]
+    return result
+
+
 def test_academic_plan_endpoint_returns_structured_review():
     reviewer = FakeAcademicPlanReviewer()
     app.dependency_overrides[get_academic_plan_reviewer] = lambda: reviewer
@@ -151,8 +159,9 @@ def test_normalize_review_response_fills_original_content_and_diff():
     assert "--- study_plan.original" in section.diff
     assert "-경제학 과목을 듣겠습니다." in section.diff
     assert "+미시경제학과 통계학을 먼저 수강한 뒤 계량경제 프로젝트로 확장하겠습니다." in section.diff
-    assert section.changes[0].type == "replace"
-    assert section.changes[0].original_text == "경제학 과목을 듣겠습니다."
+    assert section.suggestions[0].type == "replace"
+    assert section.suggestions[0].original_text == "경제학 과목을 듣겠습니다."
+    assert section.suggestions[0].suggested_text == "미시경제학과 통계학을 먼저 수강한 뒤 계량경제 프로젝트로 확장하겠습니다."
 
 
 def test_assemble_review_response_uses_smaller_agent_output():
@@ -193,11 +202,12 @@ def test_assemble_review_response_uses_smaller_agent_output():
     assert section.original_content == "경제학을 매우 열심히 공부하겠습니다."
     assert section.revised_content == "경제학을 체계적으로 공부하겠습니다."
     assert section.diff
-    assert section.changes[0].inline_diff
-    assert any(part.type == "replace" for part in section.changes[0].inline_diff)
+    assert section.suggestions[0].preview_diff
+    assert any(part.type == "replace" for part in section.suggestions[0].preview_diff)
+    assert section.suggestions[0].reason.summary == "추상적 태도 표현을 학업 방식으로 구체화했습니다."
 
 
-def test_assemble_review_response_records_skill_stage_snapshots():
+def test_assemble_review_response_omits_skill_stage_snapshots():
     request = AcademicPlanReviewRequest(
         document_type="ACADEMIC_PLAN",
         metadata=AcademicPlanMetadata(
@@ -231,14 +241,112 @@ def test_assemble_review_response_records_skill_stage_snapshots():
 
     section = _assemble_review_response(request, output).sections[0]
 
-    assert [stage.skill_name for stage in section.revision_stages] == [
-        "academic_plan_review",
-        "humanize_korean",
-    ]
-    assert section.revision_stages[0].before_content == request.sections[0].content
-    assert section.revision_stages[0].after_content == "경제학을 체계적으로 학습하겠습니다."
-    assert section.revision_stages[1].before_content == "경제학을 체계적으로 학습하겠습니다."
-    assert section.revision_stages[1].after_content == section.revised_content
+    assert "revision_stages" not in section.model_dump()
+
+
+def test_assemble_review_response_builds_sentence_suggestions_with_reasons():
+    request = AcademicPlanReviewRequest(
+        document_type="ACADEMIC_PLAN",
+        metadata=AcademicPlanMetadata(
+            major_type="DOUBLE_MAJOR",
+            target_name="경제학과",
+            user_department="컴퓨터공학과",
+        ),
+        sections=[
+            {
+                "section_key": "application_motive",
+                "content": (
+                    "경제학을 배우고 싶습니다. 데이터 분석을 좋아합니다.\n\n"
+                    "경제학을 배우고 싶습니다. 프로젝트를 해보고 싶습니다."
+                ),
+            }
+        ],
+    )
+    revised = (
+        "경제학을 체계적으로 배우고 싶습니다. 데이터 분석 경험을 시장 선택 분석과 연결하겠습니다.\n\n"
+        "경제학을 배우고 싶습니다. 플랫폼 사례 프로젝트를 수행하겠습니다."
+    )
+    output = AcademicPlanAgentOutput(
+        sections=[
+            AcademicPlanAgentSectionRevision(
+                section_key="application_motive",
+                draft_content=revised,
+                revised_content=revised,
+                reasons=[
+                    RevisionReason(
+                        original_text="경제학을 배우고 싶습니다.",
+                        revised_text="경제학을 체계적으로 배우고 싶습니다.",
+                        category="specificity",
+                        reason="학습 의지를 더 구체적인 태도로 바꾸었습니다.",
+                    ),
+                    RevisionReason(
+                        original_text="프로젝트를 해보고 싶습니다.",
+                        revised_text="플랫폼 사례 프로젝트를 수행하겠습니다.",
+                        category="fit",
+                        reason="지원 전공과 연결되는 프로젝트 방향을 제시했습니다.",
+                    ),
+                ],
+            )
+        ],
+        overall_comment="문장 단위로 보완했습니다.",
+    )
+
+    section = _assemble_review_response(request, output).sections[0]
+
+    assert len(section.suggestions) >= 3
+    assert _apply_test_suggestions(section.original_content, section.suggestions) == section.revised_content
+    assert section.suggestions[0].suggestion_id == "application_motive-001"
+    assert section.suggestions[0].original_range.start == 0
+    assert section.suggestions[0].reason.summary == "학습 의지를 더 구체적인 태도로 바꾸었습니다."
+    assert any(
+        suggestion.original_text == "프로젝트를 해보고 싶습니다."
+        and suggestion.reason.summary == "지원 전공과 연결되는 프로젝트 방향을 제시했습니다."
+        for suggestion in section.suggestions
+    )
+
+
+def test_assemble_review_response_splits_large_rewrite_into_sentence_suggestions():
+    original = "첫 문장입니다. 둘째 문장입니다.\n\n셋째 문장입니다. 넷째 문장입니다."
+    revised = (
+        "첫 문장을 구체화했습니다. 둘째 문장을 구체화했습니다. 셋째 문장을 연결했습니다.\n\n"
+        "넷째 문장을 마무리했습니다. 다섯째 문장을 추가했습니다."
+    )
+    request = AcademicPlanReviewRequest(
+        document_type="ACADEMIC_PLAN",
+        metadata=AcademicPlanMetadata(
+            major_type="DOUBLE_MAJOR",
+            target_name="경제학과",
+            user_department="컴퓨터공학과",
+        ),
+        sections=[
+            {
+                "section_key": "study_plan",
+                "content": original,
+            }
+        ],
+    )
+    output = AcademicPlanAgentOutput(
+        sections=[
+            AcademicPlanAgentSectionRevision(
+                section_key="study_plan",
+                draft_content=revised,
+                revised_content=revised,
+                reasons=[
+                    RevisionReason(
+                        category="structure",
+                        reason="문장별 역할이 드러나도록 재구성했습니다.",
+                    )
+                ],
+            )
+        ],
+        overall_comment="재구성했습니다.",
+    )
+
+    section = _assemble_review_response(request, output).sections[0]
+
+    assert len(section.suggestions) > 1
+    assert _apply_test_suggestions(section.original_content, section.suggestions) == section.revised_content
+    assert all(suggestion.reason.summary for suggestion in section.suggestions)
 
 
 def test_assemble_review_response_rejects_overly_short_long_section_revision():
